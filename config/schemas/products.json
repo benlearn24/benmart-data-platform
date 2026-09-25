@@ -1,0 +1,10 @@
+{
+  "table_name": "products",
+  "columns": [
+    {"name": "product_id", "type": "IntegerType", "nullable": false},
+    {"name": "product_name", "type": "StringType", "nullable": false},
+    {"name": "category", "type": "StringType", "nullable": false},
+    {"name": "price", "type": "DecimalType", "nullable": false},
+    {"name": "is_active", "type": "BooleanType", "nullable": false}
+  ]
+}

@@ -1,0 +1,51 @@
+project:
+  name: benmart-data-platform
+  environment: ${ENV}
+
+s3:
+  raw_bucket: s3://benmart-${ENV}-raw
+  bronze_bucket: s3://benmart-${ENV}-bronze
+  silver_bucket: s3://benmart-${ENV}-silver
+  gold_bucket: s3://benmart-${ENV}-gold
+
+database:
+  rds:
+    host: ${RDS_HOST}
+    port: 3306
+    database: benmart
+    username: ${RDS_USERNAME}
+
+tables:
+  orders:
+    source: rds
+    source_format: csv
+    primary_key: order_id
+    partition_column: order_date
+    schema_file: config/schemas/orders.json
+    raw_path: orders/
+    bronze_path: orders/
+    silver_path: orders/
+    gold_path: orders/
+
+  customers:
+    source: rds
+    source_format: csv
+    primary_key: customer_id
+    partition_column: null
+    schema_file: config/schemas/customers.json
+    raw_path: customers/
+    bronze_path: customers/
+    silver_path: customers/
+    gold_path: customers/
+
+  products:
+    source: csv
+    source_format: csv
+    primary_key: product_id
+    partition_column: null
+    schema_file: config/schemas/products.json
+    raw_path: products/
+    bronze_path: products/
+    silver_path: products/
+    gold_path: products/
+    broadcast: true
