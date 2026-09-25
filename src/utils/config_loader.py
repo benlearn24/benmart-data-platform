@@ -2,6 +2,7 @@ import os
 import yaml
 import json
 import logging
+import boto3
 
 logger = logging.getLogger(__name__)
 
@@ -11,17 +12,27 @@ def get_env():
     logger.info(f"Environment detected: {env}")
     return env
 
-def load_config(config_path=None):
-    if config_path is None:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.join(current_dir, '..', '..')
-        config_path = os.path.join(project_root, 'config', 'config.yaml')
+def read_s3_file(bucket, key):
+    s3 = boto3.client('s3')
+    response = s3.get_object(Bucket=bucket, Key=key)
+    content = response['Body'].read().decode('utf-8')
+    return content
 
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config_text = f.read()
+def load_config(config_path=None, s3_bucket=None, s3_config_key="config/config.yaml"):
+    if s3_bucket:
+        config_text = read_s3_file(s3_bucket, s3_config_key)
+    else:
+        if config_path is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.join(current_dir, '..', '..')
+            config_path = os.path.join(project_root, 'config', 'config.yaml')
+
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config_text = f.read()
 
     env = get_env()
 
@@ -52,19 +63,23 @@ def get_table_config(config, table_name):
     return config['tables'][table_name]
 
 
-def load_table_schema(config, table_name):
+def load_table_schema(config, table_name, s3_bucket=None):
     table_config = get_table_config(config, table_name)
     schema_file = table_config['schema_file']
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.join(current_dir, '..', '..')
-    schema_path = os.path.join(project_root, schema_file)
+    if s3_bucket:
+        content = read_s3_file(s3_bucket, schema_file)
+        schema = json.loads(content)
+    else:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.join(current_dir, '..', '..')
+        schema_path = os.path.join(project_root, schema_file)
 
-    if not os.path.exists(schema_path):
-        raise FileNotFoundError(f"Schema file not found: {schema_path}")
+        if not os.path.exists(schema_path):
+            raise FileNotFoundError(f"Schema file not found: {schema_path}")
 
-    with open(schema_path, 'r', encoding='utf-8') as f:
-        schema = json.load(f)
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            schema = json.load(f)
 
     logger.info(f"Schema loaded for table: {table_name}")
     return schema
