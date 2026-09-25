@@ -3,6 +3,7 @@
   "columns": [
     {"name": "order_id", "type": "IntegerType", "nullable": false},
     {"name": "customer_id", "type": "IntegerType", "nullable": false},
+    {"name": "product_id", "type": "IntegerType", "nullable": false},
     {"name": "order_date", "type": "DateType", "nullable": false},
     {"name": "total_amount", "type": "DecimalType", "nullable": false},
     {"name": "status", "type": "StringType", "nullable": true}
