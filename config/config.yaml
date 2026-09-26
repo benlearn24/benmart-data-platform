@@ -8,6 +8,9 @@ s3:
   silver_bucket: s3://benmart-${ENV}-silver
   gold_bucket: s3://benmart-${ENV}-gold
 
+gold:
+    silver_input_path: orders
+
 database:
   rds:
     host: ${RDS_HOST}
