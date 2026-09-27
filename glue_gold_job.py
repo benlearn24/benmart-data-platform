@@ -22,6 +22,7 @@ os.environ['ENV'] = env
 sc = SparkContext()
 glue_context = GlueContext(sc)
 spark = glue_context.spark_session
+spark.conf.set("spark.sql.parquet.writeLegacyFormat", "true")
 job = Job(glue_context)
 job.init(args['JOB_NAME'], args)
 
