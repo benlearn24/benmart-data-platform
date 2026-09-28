@@ -1,8 +1,8 @@
 import zipfile
 import os
 
-project_root = os.path.dirname(os.path.abspath(__file__))
-zip_path = os.path.join(project_root, "glue_package.zip")
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+zip_path = os.path.join(project_root, "../glue_package.zip")
 
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     for folder in ['src']:

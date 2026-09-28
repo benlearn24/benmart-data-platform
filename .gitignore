@@ -4,3 +4,4 @@ venv/
 data/
 .idea/
 .env
+.glue_package.zip
