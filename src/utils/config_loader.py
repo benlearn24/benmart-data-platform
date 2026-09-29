@@ -1,3 +1,25 @@
+"""
+config_loader.py — Configuration and schema loading for BenMart Data Platform.
+
+This module is the FIRST to execute in every Glue job (bronze, silver, gold).
+It reads config.yaml and schema JSON files from either local filesystem (PyCharm)
+or S3 (AWS Glue), replaces environment placeholders, and returns Python dicts.
+
+Used by:
+    - glue_bronze_job.py → load_config(), load_table_schema()
+    - glue_silver_job.py → load_config()
+    - glue_gold_job.py   → load_config()
+    - pipeline_runner.py  (indirectly — triggers Glue jobs that call this)
+
+Functions:
+    get_env()           → Current environment name ("dev" / "prod")
+    read_s3_file()      → S3 file content as string
+    load_config()       → config.yaml → Python dict (placeholders replaced)
+    get_s3_path()       → S3 full path for a table layer
+    get_table_config()  → Single table config from config dict
+    load_table_schema() → Schema JSON → Python dict
+"""
+
 import os
 import yaml
 import json
@@ -6,17 +28,34 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-
 def get_env():
-    env = os.environ.get("ENV", "dev")
-    logger.info(f"Environment detected: {env}")
+    """Read ENV from environment variables, default 'dev' if not set."""
+    env = os.environ.get("ENV")
+    if not env:
+        logger.warning("ENV variable not set. Defaulting to 'dev'. Set ENV in .env file for production.")
+        return "dev"
+    logger.info(f"Environment loaded: {env}")
     return env
 
+
 def read_s3_file(bucket, key):
+    """Read a file from S3 and return its content as string"""
     s3 = boto3.client('s3')
-    response = s3.get_object(Bucket=bucket, Key=key)
-    content = response['Body'].read().decode('utf-8')
-    return content
+    try:
+        logger.info(f"Reading S3 file: s3://{bucket}/{key}")
+        response = s3.get_object(Bucket=bucket, Key=key)
+        content = response['Body'].read().decode('utf-8')
+        logger.info(f"S3 file read successful: s3://{bucket}/{key} ({len(content)} chars)")
+        return content
+    except s3.exceptions.NoSuchBucket:
+        logger.error(f"S3 bucket does not exist: {bucket}")
+        raise
+    except s3.exceptions.NoSuchKey:
+        logger.error(f"S3 file not found: s3://{bucket}/{key}. Check if file was uploaded.")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to read S3 file: s3://{bucket}/{key} | Error: {str(e)}")
+        raise
 
 
 def load_config(config_path=None, s3_bucket=None, s3_config_key="config/config.yaml"):

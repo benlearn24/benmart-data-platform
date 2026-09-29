@@ -15,17 +15,16 @@ def read_silver_data(spark: SparkSession, silver_path: str) -> DataFrame:
 
 
 def create_fact_orders(silver_df: DataFrame) -> DataFrame:
-    """Create fact_orders — measures + foreign keys only"""
+    """Select measures + foreign keys from Silver to create fact table."""
     logger.info("Creating fact_orders...")
 
-    fact_df = silver_df.select(
-        F.col("order_id"),
-        F.col("customer_id"),
-        F.col("product_id"),
-        F.col("order_date"),
-        F.col("total_amount"),
-        F.col("total_with_gst")
-    )
+    fact_columns = ["order_id", "customer_id", "product_id", "order_date", "total_amount", "total_with_gst"]
+
+    try:
+        fact_df = silver_df.select([F.col(c) for c in fact_columns])
+    except Exception as e:
+        logger.error(f"fact_orders creation FAILED — check if Silver has columns: {fact_columns} | Error: {str(e)}")
+        raise
 
     logger.info(f"fact_orders created: {fact_df.count()} records")
     return fact_df
@@ -62,25 +61,29 @@ def create_dim_products(silver_df: DataFrame) -> DataFrame:
 
 
 def create_dim_date(silver_df: DataFrame) -> DataFrame:
-    """Create dim_date — one row per unique date with derived attributes"""
+    """Derive date attributes (day, month, quarter, year, weekend) from unique order dates."""
     logger.info("Creating dim_date...")
 
-    dim_df = silver_df.select(
-        F.col("order_date")
-    ).dropDuplicates(["order_date"])
+    try:
+        dim_df = silver_df.select(
+            F.col("order_date")
+        ).dropDuplicates(["order_date"])
 
-    dim_df = dim_df.select(
-        F.col("order_date").alias("date"),
-        F.dayofweek(F.col("order_date")).alias("day_of_week"),
-        F.date_format(F.col("order_date"), "EEEE").alias("day_name"),
-        F.month(F.col("order_date")).alias("month"),
-        F.date_format(F.col("order_date"), "MMMM").alias("month_name"),
-        F.quarter(F.col("order_date")).alias("quarter"),
-        F.year(F.col("order_date")).alias("year"),
-        F.when(
-            F.dayofweek(F.col("order_date")).isin(1, 7), True
-        ).otherwise(False).alias("is_weekend")
-    )
+        dim_df = dim_df.select(
+            F.col("order_date").alias("date"),
+            F.dayofweek(F.col("order_date")).alias("day_of_week"),
+            F.date_format(F.col("order_date"), "EEEE").alias("day_name"),
+            F.month(F.col("order_date")).alias("month"),
+            F.date_format(F.col("order_date"), "MMMM").alias("month_name"),
+            F.quarter(F.col("order_date")).alias("quarter"),
+            F.year(F.col("order_date")).alias("year"),
+            F.when(
+                F.dayofweek(F.col("order_date")).isin(1, 7), True
+            ).otherwise(False).alias("is_weekend")
+        )
+    except Exception as e:
+        logger.error(f"dim_date creation FAILED — check order_date column type | Error: {str(e)}")
+        raise
 
     logger.info(f"dim_date created: {dim_df.count()} unique dates")
     return dim_df
@@ -143,13 +146,22 @@ def create_agg_product_sales(fact_df: DataFrame, dim_products_df: DataFrame) -> 
 
 
 def write_gold(df: DataFrame, gold_path: str, table_name: str) -> None:
-    """Write a Gold table to S3 as Parquet"""
+    """Write a single Gold table to S3 as Parquet."""
     output_path = f"{gold_path}/{table_name}"
     logger.info(f"Writing {table_name} to: {output_path}")
 
-    df.write.mode("overwrite").parquet(output_path)
+    row_count = df.count()
+    if row_count == 0:
+        logger.warning(f"{table_name} is EMPTY — skipping write to {output_path}")
+        return
 
-    logger.info(f"{table_name} written successfully: {df.count()} records")
+    try:
+        df.write.mode("overwrite").parquet(output_path)
+    except Exception as e:
+        logger.error(f"Failed to write {table_name} to {output_path}: {str(e)}")
+        raise
+
+    logger.info(f"{table_name} written successfully: {row_count} records")
 
 
 def process_gold(spark: SparkSession, config: dict, s3_bucket: str = None) -> None:
@@ -202,4 +214,6 @@ def process_gold(spark: SparkSession, config: dict, s3_bucket: str = None) -> No
     logger.info("=" * 50)
     logger.info("GOLD LAYER PROCESSING COMPLETED")
     logger.info(f"Total tables written: {len(gold_tables)}")
+    for name, table_df in gold_tables.items():
+        logger.info(f"  {name}: {table_df.count()} rows")
     logger.info("=" * 50)
