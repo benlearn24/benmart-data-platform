@@ -1,6 +1,6 @@
 import logging
 from pyspark.sql import functions as F
-from src.utils.config_loader import load_config, get_s3_path, get_table_config
+from src.utils.config_loader import get_s3_path
 
 logger = logging.getLogger(__name__)
 

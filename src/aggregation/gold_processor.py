@@ -1,3 +1,16 @@
+"""
+gold_processor.py — Gold layer processing for BenMart Data Platform.
+
+Reads Silver enriched data, creates Star Schema — Fact table (measures + keys),
+Dimension tables (customers, products, dates), Aggregation tables (daily revenue,
+city orders, product sales). Writes 7 Parquet tables to Gold S3 bucket.
+
+Called by: glue_gold_job.py (via process_gold orchestrator)
+Input: S3 Silver bucket enriched Parquet
+Output: S3 Gold bucket — 7 tables (1 fact + 3 dim + 3 agg)
+"""
+
+
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 import logging
@@ -31,30 +44,32 @@ def create_fact_orders(silver_df: DataFrame) -> DataFrame:
 
 
 def create_dim_customers(silver_df: DataFrame) -> DataFrame:
-    """Create dim_customers — one row per unique customer"""
+    """Select unique customers from Silver data for dimension table."""
     logger.info("Creating dim_customers...")
 
-    dim_df = silver_df.select(
-        F.col("customer_id"),
-        F.col("customer_name"),
-        F.col("city"),
-        F.col("registered_date")
-    ).dropDuplicates(["customer_id"])
+    dim_columns = ["customer_id", "customer_name", "city", "registered_date"]
+
+    try:
+        dim_df = silver_df.select([F.col(c) for c in dim_columns]).dropDuplicates(["customer_id"])
+    except Exception as e:
+        logger.error(f"dim_customers creation FAILED — check columns: {dim_columns} | Error: {str(e)}")
+        raise
 
     logger.info(f"dim_customers created: {dim_df.count()} unique customers")
     return dim_df
 
 
 def create_dim_products(silver_df: DataFrame) -> DataFrame:
-    """Create dim_products — one row per unique product"""
+    """Select unique products from Silver data for dimension table."""
     logger.info("Creating dim_products...")
 
-    dim_df = silver_df.select(
-        F.col("product_id"),
-        F.col("product_name"),
-        F.col("category"),
-        F.col("price")
-    ).dropDuplicates(["product_id"])
+    dim_columns = ["product_id", "product_name", "category", "price"]
+
+    try:
+        dim_df = silver_df.select([F.col(c) for c in dim_columns]).dropDuplicates(["product_id"])
+    except Exception as e:
+        logger.error(f"dim_products creation FAILED — check columns: {dim_columns} | Error: {str(e)}")
+        raise
 
     logger.info(f"dim_products created: {dim_df.count()} unique products")
     return dim_df
@@ -105,41 +120,49 @@ def create_agg_daily_revenue(fact_df: DataFrame) -> DataFrame:
 
 
 def create_agg_city_orders(fact_df: DataFrame, dim_customers_df: DataFrame) -> DataFrame:
-    """Pre-calculate city wise order summary"""
+    """Join fact with dim_customers, aggregate order summary per city."""
     logger.info("Creating agg_city_orders...")
 
-    city_df = fact_df.join(
-        dim_customers_df.select("customer_id", "city"),
-        on="customer_id",
-        how="inner"
-    )
+    try:
+        city_df = fact_df.join(
+            dim_customers_df.select("customer_id", "city"),
+            on="customer_id",
+            how="inner"
+        )
 
-    agg_df = city_df.groupBy("city").agg(
-        F.count("order_id").alias("total_orders"),
-        F.countDistinct("customer_id").alias("unique_customers"),
-        F.sum("total_amount").alias("total_revenue"),
-        F.avg("total_amount").alias("avg_order_value")
-    ).orderBy(F.desc("total_revenue"))
+        agg_df = city_df.groupBy("city").agg(
+            F.count("order_id").alias("total_orders"),
+            F.countDistinct("customer_id").alias("unique_customers"),
+            F.sum("total_amount").alias("total_revenue"),
+            F.avg("total_amount").alias("avg_order_value")
+        ).orderBy(F.desc("total_revenue"))
+    except Exception as e:
+        logger.error(f"agg_city_orders creation FAILED: {str(e)}")
+        raise
 
     logger.info(f"agg_city_orders created: {agg_df.count()} cities")
     return agg_df
 
 
 def create_agg_product_sales(fact_df: DataFrame, dim_products_df: DataFrame) -> DataFrame:
-    """Pre-calculate product wise sales summary"""
+    """Join fact with dim_products, aggregate sales summary per product."""
     logger.info("Creating agg_product_sales...")
 
-    product_df = fact_df.join(
-        dim_products_df.select("product_id", "product_name", "category"),
-        on="product_id",
-        how="inner"
-    )
+    try:
+        product_df = fact_df.join(
+            dim_products_df.select("product_id", "product_name", "category"),
+            on="product_id",
+            how="inner"
+        )
 
-    agg_df = product_df.groupBy("product_id", "product_name", "category").agg(
-        F.count("order_id").alias("total_orders"),
-        F.sum("total_amount").alias("total_revenue"),
-        F.avg("total_amount").alias("avg_order_value")
-    ).orderBy(F.desc("total_revenue"))
+        agg_df = product_df.groupBy("product_id", "product_name", "category").agg(
+            F.count("order_id").alias("total_orders"),
+            F.sum("total_amount").alias("total_revenue"),
+            F.avg("total_amount").alias("avg_order_value")
+        ).orderBy(F.desc("total_revenue"))
+    except Exception as e:
+        logger.error(f"agg_product_sales creation FAILED: {str(e)}")
+        raise
 
     logger.info(f"agg_product_sales created: {agg_df.count()} products")
     return agg_df
@@ -217,3 +240,5 @@ def process_gold(spark: SparkSession, config: dict, s3_bucket: str = None) -> No
     for name, table_df in gold_tables.items():
         logger.info(f"  {name}: {table_df.count()} rows")
     logger.info("=" * 50)
+
+

@@ -59,6 +59,7 @@ def read_s3_file(bucket, key):
 
 
 def load_config(config_path=None, s3_bucket=None, s3_config_key="config/config.yaml"):
+    """Load config.yaml from local or S3, replace ${ENV} placeholders, return as dict."""
     if s3_bucket:
         config_text = read_s3_file(s3_bucket, s3_config_key)
     else:
@@ -84,17 +85,29 @@ def load_config(config_path=None, s3_bucket=None, s3_config_key="config/config.y
     for placeholder, value in replacements.items():
         config_text = config_text.replace(placeholder, value)
 
-    config = yaml.safe_load(config_text)
+    try:
+        config = yaml.safe_load(config_text)
+    except yaml.YAMLError as e:
+        logger.error(f"Config YAML parse FAILED — check config.yaml syntax | Error: {str(e)}")
+        raise
+
     logger.info(f"Config loaded for env: {env}")
     return config
 
 
 def get_s3_path(config, layer, table_name):
-    bucket = config['s3'][f'{layer}_bucket']
-    table_config = config['tables'][table_name]
-    table_path = table_config[f'{layer}_path']
+    """Build full S3 path from config bucket + table path for given layer."""
+    try:
+        bucket = config['s3'][f'{layer}_bucket']
+        table_config = config['tables'][table_name]
+        table_path = table_config[f'{layer}_path']
+    except KeyError as e:
+        logger.error(f"Config key missing for layer='{layer}', table='{table_name}' | Missing key: {str(e)}")
+        raise
+
     full_path = f"{bucket}/{table_path}"
     return full_path
+
 
 def get_table_config(config, table_name):
     if table_name not in config['tables']:
@@ -103,12 +116,17 @@ def get_table_config(config, table_name):
 
 
 def load_table_schema(config, table_name, s3_bucket=None):
+    """Load schema JSON file for a table from local or S3, return as dict."""
     table_config = get_table_config(config, table_name)
     schema_file = table_config['schema_file']
 
     if s3_bucket:
         content = read_s3_file(s3_bucket, schema_file)
-        schema = json.loads(content)
+        try:
+            schema = json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"Schema JSON parse FAILED for {table_name}: {schema_file} | Error: {str(e)}")
+            raise
     else:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.join(current_dir, '..', '..')
@@ -118,9 +136,13 @@ def load_table_schema(config, table_name, s3_bucket=None):
             raise FileNotFoundError(f"Schema file not found: {schema_path}")
 
         with open(schema_path, 'r', encoding='utf-8') as f:
-            schema = json.load(f)
+            try:
+                schema = json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(f"Schema JSON parse FAILED for {table_name}: {schema_path} | Error: {str(e)}")
+                raise
 
-    logger.info(f"Schema loaded for table: {table_name}")
+    logger.info(f"Schema loaded for table: {table_name} ({len(schema.get('columns', []))} columns)")
     return schema
 
 
