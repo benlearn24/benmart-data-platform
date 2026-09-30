@@ -2,7 +2,7 @@ import zipfile
 import os
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-zip_path = os.path.join(project_root, "../glue_package.zip")
+zip_path = os.path.join(project_root, "glue_package.zip")
 
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     for folder in ['src']:
@@ -14,6 +14,6 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     zf.write(file_path, arcname)
 
 print(f"Package created: {zip_path}")
-
+print(f"\nFiles in zip:")
 for name in zipfile.ZipFile(zip_path).namelist():
     print(f"  {name}")

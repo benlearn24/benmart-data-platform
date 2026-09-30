@@ -1,4 +1,16 @@
+"""
+generate_sample_data.py — Generate REALISTIC sample data for BenMart.
+
+Creates messy, real-world-like test data:
+  - orders.csv      (CSV — whitespace, empty fields, mixed case, bad dates)
+  - customers.json  (JSON — nested address, null fields, phone as list)
+  - products.parquet (Parquet — clean, product team pipeline output)
+
+Purpose: Test that bronze_processor handles real-world data correctly.
+"""
+
 import csv
+import json
 import random
 import os
 from datetime import datetime, timedelta
@@ -6,9 +18,11 @@ from datetime import datetime, timedelta
 random.seed(42)
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+raw_data_dir = os.path.join(project_root, "data", "raw")
 
 
-# ===== PRODUCTS =====
+# ===== PRODUCTS (Parquet — clean, typed) =====
+# Product team's own pipeline output — already clean
 products = [
     (201, "Basmati Rice", "Groceries", 120.00, True),
     (202, "Tomatoes", "Vegetables", 40.00, True),
@@ -27,20 +41,41 @@ products = [
     (215, "Dal", "Groceries", 95.00, True),
 ]
 
-products_path = os.path.join(project_root, "../data", "data/raw", "products", "products.csv")
-with open(products_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["product_id", "product_name", "category", "price", "is_active"])
-    for p in products:
-        writer.writerow([p[0], p[1], p[2], p[3], str(p[4]).lower()])
-    for p in random.sample(products, 3):
-        writer.writerow([p[0], p[1], p[2], p[3], str(p[4]).lower()])
+products_dir = os.path.join(raw_data_dir, "products")
+os.makedirs(products_dir, exist_ok=True)
+products_path = os.path.join(products_dir, "products.parquet")
 
-print(f"Products: {len(products) + 3} rows (3 duplicates)")
+try:
+    import pandas as pd
+
+    products_df = pd.DataFrame(products, columns=["product_id", "product_name", "category", "price", "is_active"])
+    dupes = products_df.sample(n=3, random_state=42)
+    products_df = pd.concat([products_df, dupes], ignore_index=True)
+    products_df.to_parquet(products_path, index=False)
+    print(f"Products: {len(products_df)} rows (3 duplicates) → Parquet ✅")
+
+except ImportError:
+    print("WARNING: pandas not installed. Run: pip install pandas pyarrow")
 
 
-# ===== CUSTOMERS =====
-cities = ["Hyderabad", "Vijayawada", "Chennai", "Bangalore", "Mumbai", "Visakhapatnam"]
+# ===== CUSTOMERS (JSON — nested, nulls, messy) =====
+# Web app API export — real-world messiness
+cities_states = {
+    "Hyderabad": "Telangana",
+    "Vijayawada": "Andhra Pradesh",
+    "Chennai": "Tamil Nadu",
+    "Bangalore": "Karnataka",
+    "Mumbai": "Maharashtra",
+    "Visakhapatnam": "Andhra Pradesh"
+}
+pincodes = {
+    "Hyderabad": "500001",
+    "Vijayawada": "520001",
+    "Chennai": "600001",
+    "Bangalore": "560001",
+    "Mumbai": "400001",
+    "Visakhapatnam": "530001"
+}
 first_names = ["Raju", "Sita", "Venkat", "Lakshmi", "Arjun", "Priya", "Kiran", "Deepa",
                "Suresh", "Anitha", "Ramesh", "Kavitha", "Manoj", "Swathi", "Prasad",
                "Divya", "Harish", "Mounika", "Srinivas", "Padma"]
@@ -49,41 +84,120 @@ last_names = ["Kumar", "Devi", "Rao", "Reddy", "Sharma", "Naidu", "Prasad", "Gup
 customers = []
 for i in range(100):
     cid = 101 + i
+    city = random.choice(list(cities_states.keys()))
+
+    # Name — sometimes with whitespace (frontend doesn't trim)
     name = f"{random.choice(first_names)} {random.choice(last_names)}"
-    email = f"{name.split()[0].lower()}{cid}@email.com" if random.random() > 0.1 else ""
-    phone = f"98{random.randint(10000000, 99999999)}" if random.random() > 0.15 else ""
-    city = random.choice(cities)
-    reg_date = (datetime(2023, 1, 1) + timedelta(days=random.randint(0, 500))).strftime("%Y-%m-%d")
-    customers.append((cid, name, email, phone, city, reg_date))
+    if random.random() < 0.08:
+        name = f"  {name}  "       # 8% chance — leading/trailing whitespace
 
-customers_path = os.path.join(project_root, "../data", "data/raw", "customers", "customers.csv")
-with open(customers_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["customer_id", "customer_name", "email", "phone", "city", "registered_date"])
-    for c in customers:
-        writer.writerow(c)
-    for c in random.sample(customers, 10):
-        writer.writerow(c)
+    # Email — sometimes null, sometimes uppercase
+    if random.random() < 0.12:
+        email = None               # 12% — no email
+    elif random.random() < 0.1:
+        email = f"{name.strip().split()[0].upper()}{cid}@EMAIL.COM"  # 10% — uppercase
+    else:
+        email = f"{name.strip().split()[0].lower()}{cid}@email.com"
 
-print(f"Customers: {len(customers) + 10} rows (10 duplicates)")
+    # Phone — sometimes list, sometimes null, sometimes single string
+    rand = random.random()
+    if rand < 0.1:
+        phone = None               # 10% — no phone at all
+    elif rand < 0.25:
+        phone = [f"98{random.randint(10000000, 99999999)}",
+                 f"91{random.randint(10000000, 99999999)}"]   # 15% — two phones
+    elif rand < 0.35:
+        phone = []                  # 10% — empty list
+    else:
+        phone = [f"98{random.randint(10000000, 99999999)}"]   # 65% — single phone in list
+
+    # Address — nested object, sometimes partial, sometimes null
+    if random.random() < 0.08:
+        address = None             # 8% — no address at all
+    elif random.random() < 0.1:
+        address = {                # 10% — partial address (no pincode)
+            "city": city,
+            "state": cities_states[city],
+            "pincode": None
+        }
+    else:
+        address = {                # 82% — full address
+            "city": city,
+            "state": cities_states[city],
+            "pincode": pincodes[city]
+        }
+
+    # Registered date — sometimes null
+    if random.random() < 0.05:
+        reg_date = None            # 5% — registration date missing
+    else:
+        reg_date = (datetime(2023, 1, 1) + timedelta(days=random.randint(0, 500))).strftime("%Y-%m-%d")
+
+    customers.append({
+        "customer_id": cid,
+        "customer_name": name,
+        "email": email,
+        "phone": phone,
+        "address": address,
+        "registered_date": reg_date
+    })
+
+# Add 10 duplicates
+for c in random.sample(customers, 10):
+    customers.append(c.copy())
+
+customers_dir = os.path.join(raw_data_dir, "customers")
+os.makedirs(customers_dir, exist_ok=True)
+customers_path = os.path.join(customers_dir, "customers.json")
+
+with open(customers_path, "w", encoding="utf-8") as f:
+    json.dump(customers, f, indent=2, ensure_ascii=False)
+
+print(f"Customers: {len(customers)} rows (10 duplicates) → JSON ✅")
+print(f"  Realistic: nested address, null emails, phone as list, whitespace names")
 
 
-# ===== ORDERS =====
-statuses = ["completed", "completed", "completed", "completed", "pending", "cancelled"]
+# ===== ORDERS (CSV — messy, real POS system output) =====
+# POS system export — whitespace, empty fields, mixed case, bad data
+statuses_messy = [
+    "completed", "completed", "completed", "completed",
+    "pending", "cancelled",
+    "Completed",           # mixed case — some branches
+    "CANCELLED",           # uppercase — old software
+    " completed ",         # whitespace — data entry issue
+    "",                    # empty string — cashier forgot
+]
 start_date = datetime(2024, 1, 1)
 
 orders = []
 for i in range(500):
     oid = i + 1
-    cid = random.choice(customers)[0]
+    cid = random.choice([c["customer_id"] for c in customers[:100]])
     pid = random.choice(products)[0]
-    odate = (start_date + timedelta(days=random.randint(0, 180))).strftime("%Y-%m-%d")
-    amount = round(random.uniform(50, 2000), 2)
-    status = random.choice(statuses)
+    status = random.choice(statuses_messy)
+
+    # Date — mostly correct, sometimes bad format
+    if random.random() < 0.03:
+        odate = "bad-date"                    # 3% — corrupted date
+    elif random.random() < 0.05:
+        odate = (start_date + timedelta(days=random.randint(0, 180))).strftime("%d-%m-%Y")  # 5% — wrong format DD-MM-YYYY
+    else:
+        odate = (start_date + timedelta(days=random.randint(0, 180))).strftime("%Y-%m-%d")  # 92% — correct
+
+    # Amount — mostly correct, sometimes empty or zero
+    if random.random() < 0.04:
+        amount = ""                           # 4% — empty amount
+    elif random.random() < 0.02:
+        amount = "0.00"                       # 2% — zero amount
+    else:
+        amount = str(round(random.uniform(50, 2000), 2))  # 94% — normal
+
     orders.append((oid, cid, pid, odate, amount, status))
 
+orders_dir = os.path.join(raw_data_dir, "orders")
+os.makedirs(orders_dir, exist_ok=True)
+orders_path = os.path.join(orders_dir, "orders.csv")
 
-orders_path = os.path.join(project_root, "../data", "data/raw", "orders", "orders.csv")
 with open(orders_path, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["order_id", "customer_id", "product_id", "order_date", "total_amount", "status"])
@@ -92,5 +206,6 @@ with open(orders_path, "w", newline="") as f:
     for o in random.sample(orders, 30):
         writer.writerow(o)
 
-print(f"Orders: {len(orders) + 30} rows (30 duplicates)")
-print("\nSample data generated!")
+print(f"Orders: {len(orders) + 30} rows (30 duplicates) → CSV ✅")
+print(f"  Realistic: whitespace status, empty amounts, bad dates, mixed case")
+print(f"\nSample data generated! 🎉")

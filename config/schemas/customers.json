@@ -1,11 +1,13 @@
 {
   "table_name": "customers",
   "columns": [
-    {"name": "customer_id", "type": "IntegerType", "nullable": false},
-    {"name": "customer_name", "type": "StringType", "nullable": false},
-    {"name": "email", "type": "StringType", "nullable": true},
-    {"name": "phone", "type": "StringType", "nullable": true},
-    {"name": "city", "type": "StringType", "nullable": false},
-    {"name": "registered_date", "type": "DateType", "nullable": false}
+    {"name": "customer_id",     "type": "IntegerType", "nullable": false},
+    {"name": "customer_name",   "type": "StringType",  "nullable": false},
+    {"name": "email",           "type": "StringType",  "nullable": true},
+    {"name": "phone",           "type": "StringType",  "nullable": true},
+    {"name": "city",            "type": "StringType",  "nullable": true},
+    {"name": "state",           "type": "StringType",  "nullable": true},
+    {"name": "pincode",         "type": "StringType",  "nullable": true},
+    {"name": "registered_date", "type": "DateType",    "nullable": true}
   ]
 }

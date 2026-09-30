@@ -9,7 +9,7 @@ s3:
   gold_bucket: s3://benmart-${ENV}-gold
 
 gold:
-    silver_input_path: orders
+  silver_input_path: orders
 
 database:
   rds:
@@ -29,10 +29,14 @@ tables:
     bronze_path: orders/
     silver_path: orders/
     gold_path: orders/
+    read_options:
+      header: "true"
+      delimiter: ","
+      inferSchema: "false"
 
   customers:
-    source: rds
-    source_format: csv
+    source: api
+    source_format: json
     primary_key: customer_id
     partition_column: null
     schema_file: config/schemas/customers.json
@@ -40,10 +44,12 @@ tables:
     bronze_path: customers/
     silver_path: customers/
     gold_path: customers/
+    read_options:
+      multiLine: "true"
 
   products:
-    source: csv
-    source_format: csv
+    source: product_team
+    source_format: parquet
     primary_key: product_id
     partition_column: null
     schema_file: config/schemas/products.json

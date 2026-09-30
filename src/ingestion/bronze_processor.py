@@ -1,25 +1,17 @@
-"""
-bronze_processor.py — Bronze layer processing for BenMart Data Platform.
-
-Reads raw CSV/JSON from S3, applies schema (STRING → correct types),
-deduplicates on primary key, adds metadata columns, writes Parquet to Bronze bucket.
-
-Called by: glue_bronze_job.py (via process_bronze orchestrator)
-Input: S3 Raw bucket CSV files
-Output: S3 Bronze bucket Parquet files (typed, deduped, partitioned)
-"""
-
 import logging
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
+from src.utils.base_processor import BaseProcessor
 from src.utils.config_loader import get_s3_path, load_table_schema
 
 logger = logging.getLogger(__name__)
 
 
-def build_schema(schema_json):
-    """Convert schema JSON (column names + type strings) to PySpark StructType."""
-    type_mapping = {
+class BronzeProcessor(BaseProcessor):
+
+    SUPPORTED_FORMATS = {"csv", "json", "parquet"}
+
+    TYPE_MAP = {
         "StringType": StringType(),
         "IntegerType": IntegerType(),
         "LongType": LongType(),
@@ -30,142 +22,140 @@ def build_schema(schema_json):
         "BooleanType": BooleanType(),
     }
 
-    fields = []
-    for col in schema_json["columns"]:
-        spark_type = type_mapping.get(col["type"], StringType())
-        nullable = col.get("nullable", True)
-        fields.append(StructField(col["name"], spark_type, nullable))
+    def __init__(self, spark, config, table_name, s3_bucket=None):
+        super().__init__(spark, config, s3_bucket)
+        self.table_name = table_name
+        self.table_config = config['tables'][table_name]
+        self.source_format = self.table_config.get('source_format', 'csv')
+        self.read_options = self.table_config.get('read_options', {})
+        self.primary_key = self.table_config['primary_key']
+        self.partition_column = self.table_config.get('partition_column', None)
+        self.raw_path = get_s3_path(config, 'raw', table_name)
+        self.bronze_path = get_s3_path(config, 'bronze', table_name)
 
-    logger.info(f"Schema built: {len(fields)} columns")
-    return StructType(fields)
+    @property
+    def processor_name(self):
+        return f"BRONZE: {self.table_name}"
 
+    def _read_raw(self):
+        logger.info(f"Reading: {self.raw_path} | Format: {self.source_format}")
 
-def read_raw_data(spark, raw_path, source_format="csv"):
-    """Read raw CSV/JSON from S3 path, return DataFrame with all STRING columns."""
-    logger.info(f"Reading raw data from: {raw_path}")
+        if self.source_format not in self.SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported format: {self.source_format}. Supported: {self.SUPPORTED_FORMATS}")
 
-    try:
-        if source_format == "csv":
-            df = (spark.read
-                  .option("header", "true")
-                  .option("inferSchema", "false")
-                  .csv(raw_path))
-        elif source_format == "json":
-            df = spark.read.json(raw_path)
-        else:
-            raise ValueError(f"Unsupported format: {source_format}. Supported: csv, json")
-    except Exception as e:
-        logger.error(f"Failed to read raw data from: {raw_path} | Format: {source_format} | Error: {str(e)}")
-        raise
+        try:
+            if self.source_format == "csv":
+                reader = self.spark.read
+                for key, value in self.read_options.items():
+                    reader = reader.option(key, value)
+                df = reader.csv(self.raw_path)
 
-    record_count = df.count()
+            elif self.source_format == "json":
+                reader = self.spark.read
+                for key, value in self.read_options.items():
+                    reader = reader.option(key, value)
+                df = reader.json(self.raw_path)
 
-    if record_count == 0:
-        logger.warning(f"Raw data is EMPTY: {raw_path}. Check if files were uploaded to S3.")
+            elif self.source_format == "parquet":
+                df = self.spark.read.parquet(self.raw_path)
 
-    logger.info(f"Raw records read: {record_count}")
-    return df
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"Read FAILED: {self.raw_path} | {self.source_format} | {str(e)}")
+            raise
 
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY data: {self.raw_path}")
+        logger.info(f"Raw records: {count}")
+        return df
 
-def apply_schema(df, schema):
-    """Cast DataFrame columns from STRING to correct types using PySpark StructType."""
-    logger.info(f"Applying schema: {len(schema.fields)} columns")
+    def _clean_data(self, df):
+        logger.info(f"Cleaning: {self.table_name} | Format: {self.source_format}")
+        before_cols = df.columns[:]
 
-    try:
+        # --- Nested JSON flatten (address.city, address.state, address.pincode) ---
+        if "address" in df.columns:
+            df = df.withColumn("city", F.col("address.city"))
+            df = df.withColumn("state", F.col("address.state"))
+            df = df.withColumn("pincode", F.col("address.pincode"))
+            df = df.drop("address")
+            logger.info("Flattened: address → city, state, pincode")
+
+        # --- Phone array → first phone as string ---
+        if "phone" in df.columns:
+            phone_type = df.schema["phone"].dataType
+            if isinstance(phone_type, ArrayType):
+                df = df.withColumn("phone", F.col("phone").getItem(0))
+                logger.info("Extracted: phone[0] from array")
+
+        # --- Whitespace trim on all string columns ---
+        for col_name in df.columns:
+            if isinstance(df.schema[col_name].dataType, StringType):
+                df = df.withColumn(col_name, F.trim(F.col(col_name)))
+
+        after_cols = df.columns[:]
+        logger.info(f"Clean done: {before_cols} → {after_cols}")
+        return df
+
+    def _build_schema(self):
+        schema_json = load_table_schema(self.config, self.table_name, s3_bucket=self.s3_bucket)
+        fields = []
+        for col in schema_json["columns"]:
+            spark_type = self.TYPE_MAP.get(col["type"], StringType())
+            nullable = col.get("nullable", True)
+            fields.append(StructField(col["name"], spark_type, nullable))
+        logger.info(f"Schema built: {len(fields)} columns")
+        return StructType(fields)
+
+    def _apply_schema(self, df, schema):
         for field in schema.fields:
             if field.name in df.columns:
                 df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
             else:
                 df = df.withColumn(field.name, F.lit(None).cast(field.dataType))
-                logger.warning(f"Column '{field.name}' not in raw data — added as NULL")
+                logger.warning(f"Column missing: {field.name} — added as NULL")
+        return df.select([field.name for field in schema.fields])
 
-        schema_columns = [field.name for field in schema.fields]
-        df = df.select(schema_columns)
-    except Exception as e:
-        logger.error(f"Schema apply FAILED: {str(e)}")
-        raise
+    @staticmethod
+    def _deduplicate(df, primary_key):
+        before = df.count()
+        df = df.dropDuplicates([primary_key])
+        after = df.count()
+        logger.info(f"Dedup: {before} → {after} ({before - after} removed)")
+        return df
 
-    logger.info(f"Schema applied successfully: {len(schema_columns)} columns selected")
-    return df
+    @staticmethod
+    def _add_metadata(df):
+        return (df
+                .withColumn("bronze_loaded_at", F.current_timestamp())
+                .withColumn("bronze_source_file", F.input_file_name()))
 
+    def _write(self, df, path, partition_column=None):
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY — skip write: {path}")
+            return
 
-def deduplicate(df, primary_key):
-    """Remove duplicate rows based on primary key, keep first occurrence."""
-    logger.info(f"Deduplicating on: {primary_key}")
-
-    if primary_key not in df.columns:
-        logger.error(f"Primary key '{primary_key}' not found in DataFrame columns: {df.columns}")
-        raise ValueError(f"Primary key '{primary_key}' not found in DataFrame")
-
-    before_count = df.count()
-    df = df.dropDuplicates([primary_key])
-    after_count = df.count()
-    dupes_removed = before_count - after_count
-    logger.info(f"Deduplication: {before_count} -> {after_count} ({dupes_removed} duplicates removed)")
-    return df
-
-
-def add_metadata(df):
-    """Add bronze_loaded_at timestamp and bronze_source_file columns."""
-    df = (df
-          .withColumn("bronze_loaded_at", F.current_timestamp())
-          .withColumn("bronze_source_file", F.input_file_name()))
-    logger.info("Metadata columns added: bronze_loaded_at, bronze_source_file")
-    return df
-
-
-def write_bronze(df, bronze_path, partition_column=None):
-    """Write DataFrame to Bronze S3 path as Parquet, optional partition."""
-    logger.info(f"Writing bronze data to: {bronze_path}")
-
-    row_count = df.count()
-    if row_count == 0:
-        logger.warning(f"Bronze DataFrame is EMPTY — nothing to write to {bronze_path}")
-        return
-
-    try:
         writer = df.write.mode("overwrite").format("parquet")
-
         if partition_column:
             writer = writer.partitionBy(partition_column)
-            logger.info(f"Partitioning by: {partition_column}")
+        writer.save(path)
+        logger.info(f"Written: {path} ({count} rows)")
 
-        writer.save(bronze_path)
-    except Exception as e:
-        logger.error(f"Bronze write FAILED to {bronze_path}: {str(e)}")
-        raise
-
-    logger.info(f"Bronze write complete: {bronze_path} ({row_count} rows)")
+    def process(self):
+        df = self._read_raw()
+        df = self._clean_data(df)
+        schema = self._build_schema()
+        df = self._apply_schema(df, schema)
+        df = self._deduplicate(df, self.primary_key)
+        df = self._add_metadata(df)
+        self._write(df, self.bronze_path, self.partition_column)
+        return df
 
 
 def process_bronze(spark, config, table_name, s3_bucket=None):
-    """Orchestrate full Bronze processing for one table — read, schema, dedup, metadata, write."""
-    logger.info(f"BRONZE PROCESSING: {table_name}")
+    processor = BronzeProcessor(spark, config, table_name, s3_bucket)
+    return processor.run()
 
-    try:
-        raw_path = get_s3_path(config, 'raw', table_name)
-        bronze_path = get_s3_path(config, 'bronze', table_name)
-        table_config = config['tables'][table_name]
-
-        schema_json = load_table_schema(config, table_name, s3_bucket=s3_bucket)
-
-        source_format = table_config.get('source_format', 'csv')
-        df = read_raw_data(spark, raw_path, source_format)
-
-        schema = build_schema(schema_json)
-        df = apply_schema(df, schema)
-
-        primary_key = table_config['primary_key']
-        df = deduplicate(df, primary_key)
-
-        df = add_metadata(df)
-
-        partition_col = table_config.get('partition_column', None)
-        write_bronze(df, bronze_path, partition_col)
-
-    except Exception as e:
-        logger.error(f"BRONZE FAILED for table '{table_name}': {str(e)}")
-        raise
-
-    logger.info(f"BRONZE COMPLETE: {table_name}")
-    return df
