@@ -28,6 +28,7 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
+
 def get_env():
     """Read ENV from environment variables, default 'dev' if not set."""
     env = os.environ.get("ENV")

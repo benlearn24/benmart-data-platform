@@ -1,35 +1,16 @@
-"""
-glue_bronze_job.py — AWS Glue entry point for Bronze layer processing.
-
-Reads raw CSV files from S3, applies schema, deduplicates, adds metadata,
-writes cleaned Parquet to Bronze bucket. Processes all tables defined in config.
-
-Triggered by: pipeline_runner.py → start_job("benmart-bronze-job")
-"""
-
 import sys
-import os
 import logging
-from awsglue.context import GlueContext
-from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
 
+from src.utils.spark_utils import setup_logging, create_glue_spark
 from src.utils.config_loader import load_config
 from src.ingestion.bronze_processor import process_bronze
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 args = getResolvedOptions(sys.argv, ['JOB_NAME', 'ENV'])
-env = args['ENV']
-os.environ['ENV'] = env
-
-sc = SparkContext()
-glue_context = GlueContext(sc)
-spark = glue_context.spark_session
-job = Job(glue_context)
-job.init(args['JOB_NAME'], args)
+spark, job, env = create_glue_spark(args)
 
 logger.info(f"Starting Bronze Processing - Environment: {env}")
 

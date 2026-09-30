@@ -1,89 +1,74 @@
-"""
-gold_processor.py — Gold layer processing for BenMart Data Platform.
-
-Reads Silver enriched data, creates Star Schema — Fact table (measures + keys),
-Dimension tables (customers, products, dates), Aggregation tables (daily revenue,
-city orders, product sales). Writes 7 Parquet tables to Gold S3 bucket.
-
-Called by: glue_gold_job.py (via process_gold orchestrator)
-Input: S3 Silver bucket enriched Parquet
-Output: S3 Gold bucket — 7 tables (1 fact + 3 dim + 3 agg)
-"""
-
-
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql import functions as F
 import logging
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+from src.utils.base_processor import BaseProcessor
 
 logger = logging.getLogger(__name__)
 
 
-def read_silver_data(spark: SparkSession, silver_path: str) -> DataFrame:
-    """Read enriched data from Silver layer"""
-    logger.info(f"Reading silver data from: {silver_path}")
-    df = spark.read.parquet(silver_path)
-    record_count = df.count()
-    logger.info(f"Silver data loaded: {record_count} records")
-    return df
+class GoldProcessor(BaseProcessor):
 
+    GOLD_TABLES = [
+        "fact_orders", "dim_customers", "dim_products", "dim_date",
+        "agg_daily_revenue", "agg_city_orders", "agg_product_sales"
+    ]
 
-def create_fact_orders(silver_df: DataFrame) -> DataFrame:
-    """Select measures + foreign keys from Silver to create fact table."""
-    logger.info("Creating fact_orders...")
+    def __init__(self, spark, config, s3_bucket=None):
+        super().__init__(spark, config, s3_bucket)
 
-    fact_columns = ["order_id", "customer_id", "product_id", "order_date", "total_amount", "total_with_gst"]
+        silver_input = config['gold']['silver_input_path']
+        if s3_bucket:
+            self.silver_path = f"{config['s3']['silver_bucket']}/{silver_input}"
+            self.gold_path = config['s3']['gold_bucket']
+        else:
+            self.silver_path = f"data/silver/{silver_input}"
+            self.gold_path = "data/gold"
 
-    try:
+    @property
+    def processor_name(self):
+        return "GOLD: star_schema"
+
+    def _read_silver(self):
+        logger.info(f"Reading silver: {self.silver_path}")
+        try:
+            df = self.spark.read.parquet(self.silver_path)
+        except Exception as e:
+            logger.error(f"Silver read FAILED: {self.silver_path} | {str(e)}")
+            raise
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY silver data: {self.silver_path}")
+        logger.info(f"Silver records: {count}")
+        return df
+
+    @staticmethod
+    def _create_fact_orders(silver_df):
+        logger.info("Creating fact_orders...")
+        fact_columns = ["order_id", "customer_id", "product_id", "order_date", "total_amount", "total_with_gst"]
         fact_df = silver_df.select([F.col(c) for c in fact_columns])
-    except Exception as e:
-        logger.error(f"fact_orders creation FAILED — check if Silver has columns: {fact_columns} | Error: {str(e)}")
-        raise
+        logger.info(f"fact_orders: {fact_df.count()} records")
+        return fact_df
 
-    logger.info(f"fact_orders created: {fact_df.count()} records")
-    return fact_df
-
-
-def create_dim_customers(silver_df: DataFrame) -> DataFrame:
-    """Select unique customers from Silver data for dimension table."""
-    logger.info("Creating dim_customers...")
-
-    dim_columns = ["customer_id", "customer_name", "city", "registered_date"]
-
-    try:
+    @staticmethod
+    def _create_dim_customers(silver_df):
+        logger.info("Creating dim_customers...")
+        dim_columns = ["customer_id", "customer_name", "city", "registered_date"]
         dim_df = silver_df.select([F.col(c) for c in dim_columns]).dropDuplicates(["customer_id"])
-    except Exception as e:
-        logger.error(f"dim_customers creation FAILED — check columns: {dim_columns} | Error: {str(e)}")
-        raise
+        logger.info(f"dim_customers: {dim_df.count()} unique")
+        return dim_df
 
-    logger.info(f"dim_customers created: {dim_df.count()} unique customers")
-    return dim_df
-
-
-def create_dim_products(silver_df: DataFrame) -> DataFrame:
-    """Select unique products from Silver data for dimension table."""
-    logger.info("Creating dim_products...")
-
-    dim_columns = ["product_id", "product_name", "category", "price"]
-
-    try:
+    @staticmethod
+    def _create_dim_products(silver_df):
+        logger.info("Creating dim_products...")
+        dim_columns = ["product_id", "product_name", "category", "price"]
         dim_df = silver_df.select([F.col(c) for c in dim_columns]).dropDuplicates(["product_id"])
-    except Exception as e:
-        logger.error(f"dim_products creation FAILED — check columns: {dim_columns} | Error: {str(e)}")
-        raise
+        logger.info(f"dim_products: {dim_df.count()} unique")
+        return dim_df
 
-    logger.info(f"dim_products created: {dim_df.count()} unique products")
-    return dim_df
-
-
-def create_dim_date(silver_df: DataFrame) -> DataFrame:
-    """Derive date attributes (day, month, quarter, year, weekend) from unique order dates."""
-    logger.info("Creating dim_date...")
-
-    try:
-        dim_df = silver_df.select(
-            F.col("order_date")
-        ).dropDuplicates(["order_date"])
-
+    @staticmethod
+    def _create_dim_date(silver_df):
+        logger.info("Creating dim_date...")
+        dim_df = silver_df.select(F.col("order_date")).dropDuplicates(["order_date"])
         dim_df = dim_df.select(
             F.col("order_date").alias("date"),
             F.dayofweek(F.col("order_date")).alias("day_of_week"),
@@ -92,153 +77,99 @@ def create_dim_date(silver_df: DataFrame) -> DataFrame:
             F.date_format(F.col("order_date"), "MMMM").alias("month_name"),
             F.quarter(F.col("order_date")).alias("quarter"),
             F.year(F.col("order_date")).alias("year"),
-            F.when(
-                F.dayofweek(F.col("order_date")).isin(1, 7), True
-            ).otherwise(False).alias("is_weekend")
+            F.when(F.dayofweek(F.col("order_date")).isin(1, 7), True).otherwise(False).alias("is_weekend")
         )
-    except Exception as e:
-        logger.error(f"dim_date creation FAILED — check order_date column type | Error: {str(e)}")
-        raise
+        logger.info(f"dim_date: {dim_df.count()} unique dates")
+        return dim_df
 
-    logger.info(f"dim_date created: {dim_df.count()} unique dates")
-    return dim_df
+    @staticmethod
+    def _create_agg_daily_revenue(fact_df):
+        logger.info("Creating agg_daily_revenue...")
+        agg_df = fact_df.groupBy("order_date").agg(
+            F.count("order_id").alias("total_orders"),
+            F.sum("total_amount").alias("total_revenue"),
+            F.sum("total_with_gst").alias("total_revenue_with_gst"),
+            F.avg("total_amount").alias("avg_order_value")
+        ).orderBy("order_date")
+        logger.info(f"agg_daily_revenue: {agg_df.count()} days")
+        return agg_df
 
-
-def create_agg_daily_revenue(fact_df: DataFrame) -> DataFrame:
-    """Pre-calculate daily revenue totals"""
-    logger.info("Creating agg_daily_revenue...")
-
-    agg_df = fact_df.groupBy("order_date").agg(
-        F.count("order_id").alias("total_orders"),
-        F.sum("total_amount").alias("total_revenue"),
-        F.sum("total_with_gst").alias("total_revenue_with_gst"),
-        F.avg("total_amount").alias("avg_order_value")
-    ).orderBy("order_date")
-
-    logger.info(f"agg_daily_revenue created: {agg_df.count()} days")
-    return agg_df
-
-
-def create_agg_city_orders(fact_df: DataFrame, dim_customers_df: DataFrame) -> DataFrame:
-    """Join fact with dim_customers, aggregate order summary per city."""
-    logger.info("Creating agg_city_orders...")
-
-    try:
+    @staticmethod
+    def _create_agg_city_orders(fact_df, dim_customers_df):
+        logger.info("Creating agg_city_orders...")
         city_df = fact_df.join(
             dim_customers_df.select("customer_id", "city"),
-            on="customer_id",
-            how="inner"
+            on="customer_id", how="inner"
         )
-
         agg_df = city_df.groupBy("city").agg(
             F.count("order_id").alias("total_orders"),
             F.countDistinct("customer_id").alias("unique_customers"),
             F.sum("total_amount").alias("total_revenue"),
             F.avg("total_amount").alias("avg_order_value")
         ).orderBy(F.desc("total_revenue"))
-    except Exception as e:
-        logger.error(f"agg_city_orders creation FAILED: {str(e)}")
-        raise
+        logger.info(f"agg_city_orders: {agg_df.count()} cities")
+        return agg_df
 
-    logger.info(f"agg_city_orders created: {agg_df.count()} cities")
-    return agg_df
-
-
-def create_agg_product_sales(fact_df: DataFrame, dim_products_df: DataFrame) -> DataFrame:
-    """Join fact with dim_products, aggregate sales summary per product."""
-    logger.info("Creating agg_product_sales...")
-
-    try:
+    @staticmethod
+    def _create_agg_product_sales(fact_df, dim_products_df):
+        logger.info("Creating agg_product_sales...")
         product_df = fact_df.join(
             dim_products_df.select("product_id", "product_name", "category"),
-            on="product_id",
-            how="inner"
+            on="product_id", how="inner"
         )
-
         agg_df = product_df.groupBy("product_id", "product_name", "category").agg(
             F.count("order_id").alias("total_orders"),
             F.sum("total_amount").alias("total_revenue"),
             F.avg("total_amount").alias("avg_order_value")
         ).orderBy(F.desc("total_revenue"))
-    except Exception as e:
-        logger.error(f"agg_product_sales creation FAILED: {str(e)}")
-        raise
+        logger.info(f"agg_product_sales: {agg_df.count()} products")
+        return agg_df
 
-    logger.info(f"agg_product_sales created: {agg_df.count()} products")
-    return agg_df
+    def _write_table(self, df, table_name):
+        output_path = f"{self.gold_path}/{table_name}"
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY — skip write: {table_name}")
+            return
+        try:
+            df.write.mode("overwrite").parquet(output_path)
+        except Exception as e:
+            logger.error(f"Write FAILED: {table_name} → {output_path} | {str(e)}")
+            raise
+        logger.info(f"Written: {table_name} ({count} rows)")
 
+    def process(self):
+        silver_df = self._read_silver()
 
-def write_gold(df: DataFrame, gold_path: str, table_name: str) -> None:
-    """Write a single Gold table to S3 as Parquet."""
-    output_path = f"{gold_path}/{table_name}"
-    logger.info(f"Writing {table_name} to: {output_path}")
+        fact_df = self._create_fact_orders(silver_df)
+        dim_customers_df = self._create_dim_customers(silver_df)
+        dim_products_df = self._create_dim_products(silver_df)
+        dim_date_df = self._create_dim_date(silver_df)
 
-    row_count = df.count()
-    if row_count == 0:
-        logger.warning(f"{table_name} is EMPTY — skipping write to {output_path}")
-        return
+        agg_daily_df = self._create_agg_daily_revenue(fact_df)
+        agg_city_df = self._create_agg_city_orders(fact_df, dim_customers_df)
+        agg_product_df = self._create_agg_product_sales(fact_df, dim_products_df)
 
-    try:
-        df.write.mode("overwrite").parquet(output_path)
-    except Exception as e:
-        logger.error(f"Failed to write {table_name} to {output_path}: {str(e)}")
-        raise
+        gold_tables = {
+            "fact_orders": fact_df,
+            "dim_customers": dim_customers_df,
+            "dim_products": dim_products_df,
+            "dim_date": dim_date_df,
+            "agg_daily_revenue": agg_daily_df,
+            "agg_city_orders": agg_city_df,
+            "agg_product_sales": agg_product_df
+        }
 
-    logger.info(f"{table_name} written successfully: {row_count} records")
+        for table_name, df in gold_tables.items():
+            self._write_table(df, table_name)
 
+        logger.info(f"Total tables written: {len(gold_tables)}")
+        for name, df in gold_tables.items():
+            logger.info(f"  {name}: {df.count()} rows")
 
-def process_gold(spark: SparkSession, config: dict, s3_bucket: str = None) -> None:
-    """Orchestrate complete Gold layer processing"""
-    logger.info("=" * 50)
-    logger.info("GOLD LAYER PROCESSING STARTED")
-    logger.info("=" * 50)
-
-    # Step 1 — Read Silver data
-    # Step 1 — Read Silver data
-    silver_input = config['gold']['silver_input_path']
-    if s3_bucket:
-        silver_path = f"{config['s3']['silver_bucket']}/{silver_input}"
-    else:
-        silver_path = f"data/silver/{silver_input}"
-    silver_df = read_silver_data(spark, silver_path)
-
-    # Step 2 — Create Fact table
-    fact_df = create_fact_orders(silver_df)
-
-    # Step 3 — Create Dimension tables
-    dim_customers_df = create_dim_customers(silver_df)
-    dim_products_df = create_dim_products(silver_df)
-    dim_date_df = create_dim_date(silver_df)
-
-    # Step 4 — Create Aggregation tables
-    agg_daily_df = create_agg_daily_revenue(fact_df)
-    agg_city_df = create_agg_city_orders(fact_df, dim_customers_df)
-    agg_product_df = create_agg_product_sales(fact_df, dim_products_df)
-
-    # Step 5 — Write all tables to Gold
-    if s3_bucket:
-        gold_path = config['s3']['gold_bucket']
-    else:
-        gold_path = "data/gold"
-
-    gold_tables = {
-        "fact_orders": fact_df,
-        "dim_customers": dim_customers_df,
-        "dim_products": dim_products_df,
-        "dim_date": dim_date_df,
-        "agg_daily_revenue": agg_daily_df,
-        "agg_city_orders": agg_city_df,
-        "agg_product_sales": agg_product_df
-    }
-
-    for table_name, df in gold_tables.items():
-        write_gold(df, gold_path, table_name)
-
-    logger.info("=" * 50)
-    logger.info("GOLD LAYER PROCESSING COMPLETED")
-    logger.info(f"Total tables written: {len(gold_tables)}")
-    for name, table_df in gold_tables.items():
-        logger.info(f"  {name}: {table_df.count()} rows")
-    logger.info("=" * 50)
+        return gold_tables
 
 
+def process_gold(spark, config, s3_bucket=None):
+    processor = GoldProcessor(spark, config, s3_bucket)
+    return processor.run()

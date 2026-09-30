@@ -1,127 +1,108 @@
 import logging
 from pyspark.sql import functions as F
+from src.utils.base_processor import BaseProcessor
 from src.utils.config_loader import get_s3_path
 
 logger = logging.getLogger(__name__)
 
 
-def read_bronze_data(spark, bronze_path):
-    """Read Parquet data from Bronze layer S3 path, return DataFrame."""
-    logger.info(f"Reading bronze data from: {bronze_path}")
+class SilverProcessor(BaseProcessor):
 
-    try:
-        df = spark.read.parquet(bronze_path)
-    except Exception as e:
-        logger.error(f"Failed to read Bronze data from: {bronze_path} | Error: {str(e)}")
-        raise
+    METADATA_COLS = ["bronze_loaded_at", "bronze_source_file"]
 
-    record_count = df.count()
+    def __init__(self, spark, config, s3_bucket=None):
+        super().__init__(spark, config, s3_bucket)
+        self.orders_path = get_s3_path(config, 'bronze', 'orders')
+        self.customers_path = get_s3_path(config, 'bronze', 'customers')
+        self.products_path = get_s3_path(config, 'bronze', 'products')
+        self.silver_path = get_s3_path(config, 'silver', 'orders')
 
-    if record_count == 0:
-        logger.warning(f"Bronze data is EMPTY: {bronze_path}. Check if Bronze job ran successfully.")
+    @property
+    def processor_name(self):
+        return "SILVER: enriched_orders"
 
-    logger.info(f"Bronze records read: {record_count}")
-    return df
+    def _read_bronze(self, path):
+        logger.info(f"Reading bronze: {path}")
+        try:
+            df = self.spark.read.parquet(path)
+        except Exception as e:
+            logger.error(f"Bronze read FAILED: {path} | {str(e)}")
+            raise
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY bronze data: {path}")
+        logger.info(f"Bronze records: {count}")
+        return df
 
+    def _drop_metadata(self, df):
+        for col in self.METADATA_COLS:
+            if col in df.columns:
+                df = df.drop(col)
+        return df
 
-def join_tables(orders_df, customers_df, products_df):
-    """Join orders with customers and products on foreign keys, return enriched DataFrame."""
-    logger.info("Joining orders with customers and products...")
+    def _join_tables(self, orders_df, customers_df, products_df):
+        logger.info("Joining orders + customers + products...")
 
-    # Drop bronze metadata from dimension tables — prevent COLUMN_ALREADY_EXISTS error
-    metadata_cols = ["bronze_loaded_at", "bronze_source_file"]
+        customers_df = self._drop_metadata(customers_df)
+        products_df = self._drop_metadata(products_df)
 
-    for col in metadata_cols:
-        if col in customers_df.columns:
-            customers_df = customers_df.drop(col)
-        if col in products_df.columns:
-            products_df = products_df.drop(col)
+        try:
+            enriched_df = (orders_df
+                           .join(customers_df, "customer_id", "inner")
+                           .join(products_df, "product_id", "inner"))
+        except Exception as e:
+            logger.error(f"JOIN failed: {str(e)}")
+            raise
 
-    try:
-        enriched_df = (orders_df
-                       .join(customers_df, "customer_id", "inner")
-                       .join(products_df, "product_id", "inner"))
-    except Exception as e:
-        logger.error(f"JOIN failed: {str(e)}")
-        raise
+        joined = enriched_df.count()
+        original = orders_df.count()
+        if joined < original:
+            logger.warning(f"JOIN dropped {original - joined} orders (key mismatch)")
+        logger.info(f"Joined records: {joined}")
+        return enriched_df
 
-    joined_count = enriched_df.count()
-    orders_count = orders_df.count()
+    @staticmethod
+    def _apply_business_rules(df):
+        logger.info("Applying business rules...")
+        before = df.count()
 
-    if joined_count < orders_count:
-        dropped = orders_count - joined_count
-        logger.warning(f"JOIN dropped {dropped} orders (customer_id or product_id mismatch)")
-
-    logger.info(f"Joined records: {joined_count}")
-    return enriched_df
-
-
-def apply_business_rules(df):
-    """Filter cancelled orders + inactive products, calculate GST column."""
-    logger.info("Applying business rules...")
-    before_count = df.count()
-
-    try:
-        # Rule 1: Remove cancelled orders (case-insensitive check)
         df = df.filter(F.lower(F.col("status")) != "cancelled")
-
-        # Rule 2: Remove inactive products
         df = df.filter(F.col("is_active") == True)
-
-        # Rule 3: Calculate GST (18%)
         df = df.withColumn("total_with_gst", F.round(F.col("total_amount") * 1.18, 2))
 
-    except Exception as e:
-        logger.error(f"Business rules FAILED: {str(e)}")
-        raise
+        after = df.count()
+        logger.info(f"Business rules: {before} → {after} ({before - after} removed)")
+        return df
 
-    after_count = df.count()
-    removed = before_count - after_count
-    logger.info(f"Business rules applied: {before_count} -> {after_count} (removed {removed} rows)")
-    return df
+    @staticmethod
+    def _add_metadata(df):
+        return df.withColumn("silver_loaded_at", F.current_timestamp())
 
+    def _write(self, df, path):
+        count = df.count()
+        if count == 0:
+            logger.warning(f"EMPTY — skip write: {path}")
+            return
 
-def add_metadata(df):
-    """Add silver_loaded_at timestamp column for pipeline tracking."""
-    df = df.withColumn("silver_loaded_at", F.current_timestamp())
-    return df
+        try:
+            df.write.mode("overwrite").format("parquet").save(path)
+        except Exception as e:
+            logger.error(f"Silver write FAILED: {path} | {str(e)}")
+            raise
+        logger.info(f"Written: {path} ({count} rows)")
 
+    def process(self):
+        orders_df = self._read_bronze(self.orders_path)
+        customers_df = self._read_bronze(self.customers_path)
+        products_df = self._read_bronze(self.products_path)
 
-def write_silver(df, silver_path):
-    """Write enriched DataFrame to Silver S3 path as Parquet."""
-    logger.info(f"Writing silver data to: {silver_path}")
-
-    row_count = df.count()
-    if row_count == 0:
-        logger.warning(f"Silver DataFrame is EMPTY — nothing to write to {silver_path}")
-        return
-
-    try:
-        df.write.mode("overwrite").format("parquet").save(silver_path)
-    except Exception as e:
-        logger.error(f"Silver write FAILED to {silver_path}: {str(e)}")
-        raise
-
-    logger.info(f"Silver write complete: {silver_path} ({row_count} rows)")
+        df = self._join_tables(orders_df, customers_df, products_df)
+        df = self._apply_business_rules(df)
+        df = self._add_metadata(df)
+        self._write(df, self.silver_path)
+        return df
 
 
 def process_silver(spark, config, s3_bucket=None):
-    logger.info("SILVER PROCESSING: enriched_orders")
-
-    orders_path = get_s3_path(config, 'bronze', 'orders')
-    customers_path = get_s3_path(config, 'bronze', 'customers')
-    products_path = get_s3_path(config, 'bronze', 'products')
-    silver_path = get_s3_path(config, 'silver', 'orders')
-
-    orders_df = read_bronze_data(spark, orders_path)
-    customers_df = read_bronze_data(spark, customers_path)
-    products_df = read_bronze_data(spark, products_path)
-
-    df = join_tables(orders_df, customers_df, products_df)
-    df = apply_business_rules(df)
-    df = add_metadata(df)
-
-    write_silver(df, silver_path)
-
-    logger.info("SILVER COMPLETE: enriched_orders")
-    return df
+    processor = SilverProcessor(spark, config, s3_bucket)
+    return processor.run()
