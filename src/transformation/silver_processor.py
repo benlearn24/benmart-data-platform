@@ -1,105 +1,141 @@
+"""Silver Processor — Business logic layer with incremental support."""
+
 import logging
 from pyspark.sql import functions as F
 from src.utils.base_processor import BaseProcessor
 from src.utils.config_loader import get_s3_path
+from utils.watermark_manager import WatermarkManager
 
 logger = logging.getLogger(__name__)
 
 
 class SilverProcessor(BaseProcessor):
-
-    METADATA_COLS = ["bronze_loaded_at", "bronze_source_file"]
+    """Joins Bronze tables, applies business rules, writes enriched data to Silver."""
 
     def __init__(self, spark, config, s3_bucket=None):
         super().__init__(spark, config, s3_bucket)
+
         self.orders_path = get_s3_path(config, 'bronze', 'orders')
         self.customers_path = get_s3_path(config, 'bronze', 'customers')
         self.products_path = get_s3_path(config, 'bronze', 'products')
-        self.silver_path = get_s3_path(config, 'silver', 'orders')
+
+        silver_config = config.get('silver', {})
+        output_path = silver_config.get('output_path', 'enriched_orders')
+        self.silver_path = f"s3://{config['s3']['silver_bucket']}/{output_path}"
+
+        self.load_mode = silver_config.get('load_mode', 'full')
+        self.watermark = None
+
+        if self.load_mode == 'incremental' and s3_bucket:
+            manifest_prefix = config['s3'].get('manifest_prefix', 'manifests/')
+            self.watermark = WatermarkManager(
+                config['s3']['raw_bucket'], manifest_prefix, 'silver'
+            )
+
+        logger.info(f"🔧 {self.processor_name} initialized | mode={self.load_mode}")
 
     @property
     def processor_name(self):
-        return "SILVER: enriched_orders"
+        return "SILVER"
 
-    def _read_bronze(self, path):
-        logger.info(f"Reading bronze: {path}")
-        try:
-            df = self.spark.read.parquet(path)
-        except Exception as e:
-            logger.error(f"Bronze read FAILED: {path} | {str(e)}")
-            raise
-        count = df.count()
-        if count == 0:
-            logger.warning(f"EMPTY bronze data: {path}")
-        logger.info(f"Bronze records: {count}")
-        return df
+    def _read_bronze(self):
+        orders = self.spark.read.parquet(self.orders_path)
+        customers = self.spark.read.parquet(self.customers_path)
+        products = self.spark.read.parquet(self.products_path)
+
+        total_orders = orders.count()
+        logger.info(
+            f"📥 Bronze read — orders: {total_orders}, "
+            f"customers: {customers.count()}, products: {products.count()}"
+        )
+
+        # Incremental: filter orders by watermark timestamp
+        if self.load_mode == "incremental" and self.watermark:
+            watermark_ts = self.watermark.get_watermark()
+            if watermark_ts:
+                orders = orders.filter(
+                    F.col("bronze_loaded_at") > F.lit(watermark_ts).cast("timestamp")
+                )
+                new_count = orders.count()
+                logger.info(
+                    f"📥 Incremental filter: {total_orders} total → "
+                    f"{new_count} new (since {watermark_ts})"
+                )
+
+        return orders, customers, products
 
     def _drop_metadata(self, df):
-        for col in self.METADATA_COLS:
+        for col in ["bronze_loaded_at", "bronze_source_file"]:
             if col in df.columns:
                 df = df.drop(col)
         return df
 
-    def _join_tables(self, orders_df, customers_df, products_df):
-        logger.info("Joining orders + customers + products...")
-
-        customers_df = self._drop_metadata(customers_df)
-        products_df = self._drop_metadata(products_df)
-
-        try:
-            enriched_df = (orders_df
-                           .join(customers_df, "customer_id", "inner")
-                           .join(products_df, "product_id", "inner"))
-        except Exception as e:
-            logger.error(f"JOIN failed: {str(e)}")
-            raise
-
-        joined = enriched_df.count()
-        original = orders_df.count()
-        if joined < original:
-            logger.warning(f"JOIN dropped {original - joined} orders (key mismatch)")
-        logger.info(f"Joined records: {joined}")
-        return enriched_df
-
-    @staticmethod
-    def _apply_business_rules(df):
-        logger.info("Applying business rules...")
-        before = df.count()
-
-        df = df.filter(F.lower(F.col("status")) != "cancelled")
-        df = df.filter(F.col("is_active") == True)
-        df = df.withColumn("total_with_gst", F.round(F.col("total_amount") * 1.18, 2))
-
-        after = df.count()
-        logger.info(f"Business rules: {before} → {after} ({before - after} removed)")
+    def _join_tables(self, orders, customers, products):
+        df = (orders
+              .join(customers, "customer_id", "inner")
+              .join(products, "product_id", "inner"))
+        logger.info(f"🔗 Joined: {df.count()} rows")
         return df
 
-    @staticmethod
-    def _add_metadata(df):
+    def _apply_business_rules(self, df):
+        before = df.count()
+
+        # Filter cancelled orders
+        df = df.filter(F.col("status") != "cancelled")
+
+        # Filter inactive products
+        if "is_active" in df.columns:
+            df = df.filter(F.col("is_active") == True)
+
+        after = df.count()
+        logger.info(f"📏 Business filter: {before} → {after} ({before - after} removed)")
+
+        # GST calculation (18%)
+        df = (df
+              .withColumn("gst_amount", F.round(F.col("total_amount") * 0.18, 2))
+              .withColumn("grand_total", F.round(F.col("total_amount") + F.col("gst_amount"), 2)))
+        logger.info("  Applied GST calculation")
+
+        return df
+
+    def _add_metadata(self, df):
         return df.withColumn("silver_loaded_at", F.current_timestamp())
 
-    def _write(self, df, path):
+    def _write(self, df):
         count = df.count()
         if count == 0:
-            logger.warning(f"EMPTY — skip write: {path}")
+            logger.warning(f"⚠️ EMPTY — skipping write to {self.silver_path}")
             return
 
-        try:
-            df.write.mode("overwrite").format("parquet").save(path)
-        except Exception as e:
-            logger.error(f"Silver write FAILED: {path} | {str(e)}")
-            raise
-        logger.info(f"Written: {path} ({count} rows)")
+        write_mode = "append" if self.load_mode == "incremental" else "overwrite"
+        df.write.mode(write_mode).format("parquet").save(self.silver_path)
+        logger.info(f"📤 Written {count} rows → {self.silver_path} | mode={write_mode}")
 
     def process(self):
-        orders_df = self._read_bronze(self.orders_path)
-        customers_df = self._read_bronze(self.customers_path)
-        products_df = self._read_bronze(self.products_path)
+        orders, customers, products = self._read_bronze()
 
-        df = self._join_tables(orders_df, customers_df, products_df)
+        # Capture watermark BEFORE dropping metadata (bronze_loaded_at column)
+        new_watermark = None
+        if self.load_mode == "incremental" and self.watermark:
+            if orders.count() == 0:
+                logger.info("⏭️ No new orders — skipping Silver")
+                return None
+            max_ts = orders.agg(F.max("bronze_loaded_at")).collect()[0][0]
+            new_watermark = max_ts.isoformat() if max_ts else None
+
+        orders = self._drop_metadata(orders)
+        customers = self._drop_metadata(customers)
+        products = self._drop_metadata(products)
+
+        df = self._join_tables(orders, customers, products)
         df = self._apply_business_rules(df)
         df = self._add_metadata(df)
-        self._write(df, self.silver_path)
+        self._write(df)
+
+        # Update watermark after successful write
+        if new_watermark:
+            self.watermark.update(new_watermark)
+
         return df
 
 

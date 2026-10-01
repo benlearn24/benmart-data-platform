@@ -1,3 +1,5 @@
+"""Pipeline Runner — triggers Glue jobs from local and monitors execution."""
+
 import boto3
 import time
 import logging
@@ -18,13 +20,9 @@ class PipelineRunner:
 
     REQUIRED_ENV_VARS = ["ENV", "AWS_REGION"]
 
-    PIPELINE_JOBS = [
-        "benmart-bronze-job",
-        "benmart-silver-job",
-        "benmart-gold-job"
-    ]
+    PIPELINE_JOBS = ["benmart-full-pipeline"]
 
-    def __init__(self, poll_interval=30, max_wait_time=600):
+    def __init__(self, poll_interval=30, max_wait_time=1800):
         self._validate_env()
         self.env = os.environ["ENV"]
         self.region = os.environ["AWS_REGION"]
@@ -36,7 +34,7 @@ class PipelineRunner:
             self.glue_client = boto3.client('glue', region_name=self.region)
             logger.info(f"Glue client initialized: {self.region}")
         except Exception as e:
-            logger.error(f"Glue client FAILED: {str(e)}")
+            logger.error(f"Glue client FAILED: {e}")
             raise
 
     def _validate_env(self):
@@ -59,7 +57,7 @@ class PipelineRunner:
             elif error_code == 'ConcurrentRunsExceededException':
                 logger.error(f"Already running: {job_name}. Wait for previous run.")
             else:
-                logger.error(f"AWS error: {job_name} | {error_code} — {str(e)}")
+                logger.error(f"AWS error: {job_name} | {error_code} — {e}")
             raise
 
         run_id = response['JobRunId']
@@ -76,7 +74,7 @@ class PipelineRunner:
                     RunId=run_id
                 )
             except ClientError as e:
-                logger.error(f"Status check FAILED: {job_name} | {str(e)}")
+                logger.error(f"Status check FAILED: {job_name} | {e}")
                 return 'ERROR'
 
             status = response['JobRun']['JobRunState']
@@ -139,7 +137,7 @@ class PipelineRunner:
             try:
                 run_id = self._start_job(job_name)
             except Exception as e:
-                logger.error(f"FAILED TO START: {job_name} | {str(e)}")
+                logger.error(f"FAILED TO START: {job_name} | {e}")
                 self.results[job_name] = 'FAILED_TO_START'
                 break
 
@@ -155,9 +153,3 @@ class PipelineRunner:
         duration = round(time.time() - start_time, 1)
         return self._print_summary(duration)
 
-
-if __name__ == "__main__":
-    runner = PipelineRunner()
-    success = runner.run()
-    if not success:
-        exit(1)
