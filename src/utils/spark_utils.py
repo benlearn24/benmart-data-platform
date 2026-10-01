@@ -1,6 +1,6 @@
-import logging
-import os
 import sys
+import os
+import logging
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
@@ -14,7 +14,8 @@ def setup_logging():
     )
 
 
-def create_glue_spark(args):
+def create_glue_spark(arg_names):
+    args = getResolvedOptions(sys.argv, arg_names)
     env = args['ENV']
     os.environ['ENV'] = env
 

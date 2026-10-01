@@ -44,7 +44,7 @@ class GoldProcessor(BaseProcessor):
     @staticmethod
     def _create_fact_orders(silver_df):
         logger.info("Creating fact_orders...")
-        fact_columns = ["order_id", "customer_id", "product_id", "order_date", "total_amount", "total_with_gst"]
+        fact_columns = ["order_id", "customer_id", "product_id", "order_date", "total_amount", "grand_total"]
         fact_df = silver_df.select([F.col(c) for c in fact_columns])
         logger.info(f"fact_orders: {fact_df.count()} records")
         return fact_df

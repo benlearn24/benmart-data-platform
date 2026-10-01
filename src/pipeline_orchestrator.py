@@ -12,22 +12,27 @@ logger = logging.getLogger(__name__)
 
 
 def timed(step_name):
-    """Logs execution time of each pipeline step."""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            logger.info(f"▶ Starting: {step_name}")
+            logger.info(f"{'='*50}")
+            logger.info(f"▶ STARTING: {step_name}")
+            logger.info(f"{'='*50}")
             start = time.time()
-            result = func(*args, **kwargs)
-            elapsed = round(time.time() - start, 1)
-            logger.info(f"✅ {step_name} complete | {elapsed}s")
-            return result
+            try:
+                result = func(*args, **kwargs)
+                elapsed = round(time.time() - start, 1)
+                logger.info(f"✅ {step_name} COMPLETE | {elapsed}s")
+                return result
+            except Exception as e:
+                elapsed = round(time.time() - start, 1)
+                logger.error(f"❌ {step_name} FAILED after {elapsed}s | {e}")
+                raise
         return wrapper
     return decorator
 
 
 class PipelineOrchestrator:
-    """Chains Bronze → Silver → Gold in one call."""
 
     def __init__(self, spark, config, s3_bucket=None):
         self.spark = spark
@@ -39,9 +44,11 @@ class PipelineOrchestrator:
     def _run_bronze(self):
         results = {}
         for table in self.tables:
+            logger.info(f"  📦 Processing: {table}")
             results[table] = process_bronze(
                 self.spark, self.config, table, self.s3_bucket
             )
+            logger.info(f"  ✅ {table} done")
         return results
 
     @timed("SILVER LAYER")
@@ -54,11 +61,16 @@ class PipelineOrchestrator:
 
     def run(self):
         start = time.time()
-        logger.info("🚀 Pipeline starting")
+        logger.info(f"{'='*50}")
+        logger.info("🚀 PIPELINE STARTING")
+        logger.info(f"  Tables: {self.tables}")
+        logger.info(f"{'='*50}")
 
         self._run_bronze()
         self._run_silver()
         self._run_gold()
 
         total = round(time.time() - start, 1)
-        logger.info(f"🎉 Pipeline complete | Total: {total}s")
+        logger.info(f"{'='*50}")
+        logger.info(f"🎉 PIPELINE COMPLETE | Total: {total}s")
+        logger.info(f"{'='*50}")

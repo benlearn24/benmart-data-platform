@@ -12,7 +12,7 @@ from pyspark.sql.types import (
 
 from src.utils.base_processor import BaseProcessor
 from src.utils.config_loader import get_s3_path, load_table_schema
-from utils.manifest_manager import ManifestManager
+from src.utils.manifest_manager import ManifestManager
 
 logger = logging.getLogger(__name__)
 
@@ -317,3 +317,4 @@ class BronzeProcessor(BaseProcessor):
 def process_bronze(spark, config, table_name, s3_bucket=None):
     processor = BronzeProcessor(spark, config, table_name, s3_bucket)
     return processor.run()
+
