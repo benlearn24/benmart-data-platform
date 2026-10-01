@@ -1,211 +1,278 @@
-"""
-generate_sample_data.py — Generate REALISTIC sample data for BenMart.
+"""Generate realistic sample data (~1GB) for BenMart Data Platform."""
 
-Creates messy, real-world-like test data:
-  - orders.csv      (CSV — whitespace, empty fields, mixed case, bad dates)
-  - customers.json  (JSON — nested address, null fields, phone as list)
-  - products.parquet (Parquet — clean, product team pipeline output)
-
-Purpose: Test that bronze_processor handles real-world data correctly.
-"""
-
+import os
 import csv
 import json
 import random
-import os
+import pandas as pd
 from datetime import datetime, timedelta
 
 random.seed(42)
+BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "raw")
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-raw_data_dir = os.path.join(project_root, "data", "raw")
+# ─── Realistic Indian data pools ────────────────────────────
 
-
-# ===== PRODUCTS (Parquet — clean, typed) =====
-# Product team's own pipeline output — already clean
-products = [
-    (201, "Basmati Rice", "Groceries", 120.00, True),
-    (202, "Tomatoes", "Vegetables", 40.00, True),
-    (203, "Milk", "Dairy", 28.00, True),
-    (204, "Chicken", "Meat", 220.00, True),
-    (205, "Mangoes", "Fruits", 150.00, False),
-    (206, "Onions", "Vegetables", 35.00, True),
-    (207, "Paneer", "Dairy", 90.00, True),
-    (208, "Eggs", "Dairy", 72.00, True),
-    (209, "Atta", "Groceries", 55.00, True),
-    (210, "Bananas", "Fruits", 45.00, True),
-    (211, "Potatoes", "Vegetables", 30.00, True),
-    (212, "Curd", "Dairy", 25.00, True),
-    (213, "Sugar", "Groceries", 48.00, True),
-    (214, "Oil", "Groceries", 180.00, True),
-    (215, "Dal", "Groceries", 95.00, True),
+FIRST_NAMES = [
+    "Raju", "Venkat", "Suresh", "Priya", "Lakshmi", "Anil", "Deepa", "Kiran",
+    "Sanjay", "Meena", "Arjun", "Divya", "Rahul", "Sneha", "Vikram", "Anjali",
+    "Ramesh", "Pooja", "Manoj", "Kavitha", "Naveen", "Swathi", "Ganesh", "Radha",
+    "Prasad", "Bhavani", "Harish", "Rekha", "Chandra", "Padma", "Srinivas", "Uma",
+    "Naresh", "Sunitha", "Rajesh", "Asha", "Mohan", "Vani", "Satish", "Madhavi"
 ]
 
-products_dir = os.path.join(raw_data_dir, "products")
-os.makedirs(products_dir, exist_ok=True)
-products_path = os.path.join(products_dir, "products.parquet")
-
-try:
-    import pandas as pd
-
-    products_df = pd.DataFrame(products, columns=["product_id", "product_name", "category", "price", "is_active"])
-    dupes = products_df.sample(n=3, random_state=42)
-    products_df = pd.concat([products_df, dupes], ignore_index=True)
-    products_df.to_parquet(products_path, index=False)
-    print(f"Products: {len(products_df)} rows (3 duplicates) → Parquet ✅")
-
-except ImportError:
-    print("WARNING: pandas not installed. Run: pip install pandas pyarrow")
-
-
-# ===== CUSTOMERS (JSON — nested, nulls, messy) =====
-# Web app API export — real-world messiness
-cities_states = {
-    "Hyderabad": "Telangana",
-    "Vijayawada": "Andhra Pradesh",
-    "Chennai": "Tamil Nadu",
-    "Bangalore": "Karnataka",
-    "Mumbai": "Maharashtra",
-    "Visakhapatnam": "Andhra Pradesh"
-}
-pincodes = {
-    "Hyderabad": "500001",
-    "Vijayawada": "520001",
-    "Chennai": "600001",
-    "Bangalore": "560001",
-    "Mumbai": "400001",
-    "Visakhapatnam": "530001"
-}
-first_names = ["Raju", "Sita", "Venkat", "Lakshmi", "Arjun", "Priya", "Kiran", "Deepa",
-               "Suresh", "Anitha", "Ramesh", "Kavitha", "Manoj", "Swathi", "Prasad",
-               "Divya", "Harish", "Mounika", "Srinivas", "Padma"]
-last_names = ["Kumar", "Devi", "Rao", "Reddy", "Sharma", "Naidu", "Prasad", "Gupta"]
-
-customers = []
-for i in range(100):
-    cid = 101 + i
-    city = random.choice(list(cities_states.keys()))
-
-    # Name — sometimes with whitespace (frontend doesn't trim)
-    name = f"{random.choice(first_names)} {random.choice(last_names)}"
-    if random.random() < 0.08:
-        name = f"  {name}  "       # 8% chance — leading/trailing whitespace
-
-    # Email — sometimes null, sometimes uppercase
-    if random.random() < 0.12:
-        email = None               # 12% — no email
-    elif random.random() < 0.1:
-        email = f"{name.strip().split()[0].upper()}{cid}@EMAIL.COM"  # 10% — uppercase
-    else:
-        email = f"{name.strip().split()[0].lower()}{cid}@email.com"
-
-    # Phone — sometimes list, sometimes null, sometimes single string
-    rand = random.random()
-    if rand < 0.1:
-        phone = None               # 10% — no phone at all
-    elif rand < 0.25:
-        phone = [f"98{random.randint(10000000, 99999999)}",
-                 f"91{random.randint(10000000, 99999999)}"]   # 15% — two phones
-    elif rand < 0.35:
-        phone = []                  # 10% — empty list
-    else:
-        phone = [f"98{random.randint(10000000, 99999999)}"]   # 65% — single phone in list
-
-    # Address — nested object, sometimes partial, sometimes null
-    if random.random() < 0.08:
-        address = None             # 8% — no address at all
-    elif random.random() < 0.1:
-        address = {                # 10% — partial address (no pincode)
-            "city": city,
-            "state": cities_states[city],
-            "pincode": None
-        }
-    else:
-        address = {                # 82% — full address
-            "city": city,
-            "state": cities_states[city],
-            "pincode": pincodes[city]
-        }
-
-    # Registered date — sometimes null
-    if random.random() < 0.05:
-        reg_date = None            # 5% — registration date missing
-    else:
-        reg_date = (datetime(2023, 1, 1) + timedelta(days=random.randint(0, 500))).strftime("%Y-%m-%d")
-
-    customers.append({
-        "customer_id": cid,
-        "customer_name": name,
-        "email": email,
-        "phone": phone,
-        "address": address,
-        "registered_date": reg_date
-    })
-
-# Add 10 duplicates
-for c in random.sample(customers, 10):
-    customers.append(c.copy())
-
-customers_dir = os.path.join(raw_data_dir, "customers")
-os.makedirs(customers_dir, exist_ok=True)
-customers_path = os.path.join(customers_dir, "customers.json")
-
-with open(customers_path, "w", encoding="utf-8") as f:
-    json.dump(customers, f, indent=2, ensure_ascii=False)
-
-print(f"Customers: {len(customers)} rows (10 duplicates) → JSON ✅")
-print(f"  Realistic: nested address, null emails, phone as list, whitespace names")
-
-
-# ===== ORDERS (CSV — messy, real POS system output) =====
-# POS system export — whitespace, empty fields, mixed case, bad data
-statuses_messy = [
-    "completed", "completed", "completed", "completed",
-    "pending", "cancelled",
-    "Completed",           # mixed case — some branches
-    "CANCELLED",           # uppercase — old software
-    " completed ",         # whitespace — data entry issue
-    "",                    # empty string — cashier forgot
+LAST_NAMES = [
+    "Kumar", "Reddy", "Sharma", "Patel", "Rao", "Singh", "Naidu", "Verma",
+    "Gupta", "Yadav", "Pillai", "Nair", "Iyer", "Joshi", "Mishra", "Choudhary",
+    "Das", "Patil", "Kulkarni", "Deshpande", "Menon", "Bhat", "Shetty", "Hegde"
 ]
-start_date = datetime(2024, 1, 1)
 
-orders = []
-for i in range(500):
-    oid = i + 1
-    cid = random.choice([c["customer_id"] for c in customers[:100]])
-    pid = random.choice(products)[0]
-    status = random.choice(statuses_messy)
+CITIES = {
+    "Hyderabad": ("Telangana", ["500001", "500032", "500072", "500081"]),
+    "Bangalore": ("Karnataka", ["560001", "560034", "560078", "560102"]),
+    "Chennai": ("Tamil Nadu", ["600001", "600028", "600042", "600096"]),
+    "Mumbai": ("Maharashtra", ["400001", "400050", "400070", "400093"]),
+    "Delhi": ("Delhi", ["110001", "110025", "110044", "110085"]),
+    "Pune": ("Maharashtra", ["411001", "411038", "411057"]),
+    "Kolkata": ("West Bengal", ["700001", "700020", "700064"]),
+    "Ahmedabad": ("Gujarat", ["380001", "380015", "380054"]),
+    "Jaipur": ("Rajasthan", ["302001", "302015", "302021"]),
+    "Vizag": ("Andhra Pradesh", ["530001", "530016", "530045"]),
+}
 
-    # Date — mostly correct, sometimes bad format
-    if random.random() < 0.03:
-        odate = "bad-date"                    # 3% — corrupted date
-    elif random.random() < 0.05:
-        odate = (start_date + timedelta(days=random.randint(0, 180))).strftime("%d-%m-%Y")  # 5% — wrong format DD-MM-YYYY
-    else:
-        odate = (start_date + timedelta(days=random.randint(0, 180))).strftime("%Y-%m-%d")  # 92% — correct
+DOMAINS = ["gmail.com", "yahoo.com", "outlook.com", "rediffmail.com", "hotmail.com"]
 
-    # Amount — mostly correct, sometimes empty or zero
-    if random.random() < 0.04:
-        amount = ""                           # 4% — empty amount
-    elif random.random() < 0.02:
-        amount = "0.00"                       # 2% — zero amount
-    else:
-        amount = str(round(random.uniform(50, 2000), 2))  # 94% — normal
+CATEGORIES = {
+    "Electronics":  {"prefix": ["Samsung", "Boat", "Realme", "JBL", "Sony", "Mi", "OnePlus", "Noise"],
+                     "suffix": ["Earbuds", "Speaker", "Charger", "Power Bank", "Smartwatch", "Cable", "Adapter", "Headphones"]},
+    "Clothing":     {"prefix": ["Cotton", "Silk", "Linen", "Denim", "Woolen", "Printed", "Plain", "Checked"],
+                     "suffix": ["T-Shirt", "Shirt", "Kurta", "Jeans", "Saree", "Jacket", "Shorts", "Dress"]},
+    "Groceries":    {"prefix": ["Organic", "Fresh", "Premium", "Fortune", "Aashirvaad", "Tata", "MTR", "Amul"],
+                     "suffix": ["Rice 5kg", "Atta 10kg", "Oil 1L", "Dal 1kg", "Sugar 5kg", "Tea 500g", "Ghee 1L", "Milk 1L"]},
+    "Home & Kitchen": {"prefix": ["Milton", "Prestige", "Pigeon", "Borosil", "Cello", "Bajaj", "Philips", "Crompton"],
+                       "suffix": ["Mixer", "Cooker", "Pan", "Bottle Set", "Container", "Iron", "Fan", "Kettle"]},
+    "Beauty":       {"prefix": ["Lakme", "Nivea", "Dove", "Himalaya", "Biotique", "Mamaearth", "Ponds", "Garnier"],
+                     "suffix": ["Face Wash", "Shampoo", "Cream", "Serum", "Sunscreen", "Lipstick", "Lotion", "Hair Oil"]},
+}
 
-    orders.append((oid, cid, pid, odate, amount, status))
+STATUSES = ["completed", "pending", "shipped", "cancelled", "returned"]
+MESSY_STATUSES = [" completed ", "COMPLETED", "Completed", " pending", "SHIPPED ", "cancelled", " returned "]
 
-orders_dir = os.path.join(raw_data_dir, "orders")
-os.makedirs(orders_dir, exist_ok=True)
-orders_path = os.path.join(orders_dir, "orders.csv")
+DATE_START = datetime(2023, 1, 1)
+DATE_END = datetime(2026, 9, 30)
+DATE_RANGE_DAYS = (DATE_END - DATE_START).days
 
-with open(orders_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["order_id", "customer_id", "product_id", "order_date", "total_amount", "status"])
-    for o in orders:
-        writer.writerow(o)
-    for o in random.sample(orders, 30):
-        writer.writerow(o)
 
-print(f"Orders: {len(orders) + 30} rows (30 duplicates) → CSV ✅")
-print(f"  Realistic: whitespace status, empty amounts, bad dates, mixed case")
-print(f"\nSample data generated! 🎉")
+def random_date():
+    return (DATE_START + timedelta(days=random.randint(0, DATE_RANGE_DAYS))).strftime("%Y-%m-%d")
+
+def messy_date():
+    """10% chance of bad date format."""
+    if random.random() < 0.10:
+        d = DATE_START + timedelta(days=random.randint(0, DATE_RANGE_DAYS))
+        formats = [
+            d.strftime("%d-%m-%Y"),        # wrong format
+            d.strftime("%m/%d/%Y"),         # US format
+            "bad-date",                      # garbage
+            "",                              # empty
+            d.strftime("%Y/%m/%d"),          # slash instead of dash
+        ]
+        return random.choice(formats)
+    return random_date()
+
+def random_phone():
+    return f"{random.choice(['98', '97', '96', '95', '91', '90', '88', '87', '70', '63'])}{random.randint(10000000, 99999999)}"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PRODUCTS — 5,000 rows, Parquet
+# ═══════════════════════════════════════════════════════════════
+
+def generate_products():
+    print("📦 Generating products...")
+    products = []
+    pid = 1
+
+    for category, data in CATEGORIES.items():
+        combos = [(p, s) for p in data["prefix"] for s in data["suffix"]]
+        for prefix, suffix in combos:
+            products.append({
+                "product_id": pid,
+                "product_name": f"{prefix} {suffix}",
+                "category": category,
+                "price": round(random.uniform(50, 25000), 2),
+                "is_active": random.choice([True, True, True, True, False])  # 20% inactive
+            })
+            pid += 1
+
+    # Pad to 5000 with variations
+    while len(products) < 5000:
+        cat = random.choice(list(CATEGORIES.keys()))
+        prefix = random.choice(CATEGORIES[cat]["prefix"])
+        suffix = random.choice(CATEGORIES[cat]["suffix"])
+        variant = random.choice(["Pro", "Lite", "Max", "Mini", "Plus", "V2", "XL", "SE"])
+        products.append({
+            "product_id": pid,
+            "product_name": f"{prefix} {suffix} {variant}",
+            "category": cat,
+            "price": round(random.uniform(50, 25000), 2),
+            "is_active": random.choice([True, True, True, True, False])
+        })
+        pid += 1
+
+    # Add 200 duplicates
+    for _ in range(200):
+        products.append(random.choice(products[:5000]))
+
+    random.shuffle(products)
+
+    path = os.path.join(BASE_DIR, "products")
+    os.makedirs(path, exist_ok=True)
+    df = pd.DataFrame(products)
+    df.to_parquet(os.path.join(path, "products.parquet"), index=False)
+    print(f"  ✅ Products: {len(products)} rows ({len(products) - 200} unique + 200 dupes)")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CUSTOMERS — 200,000 rows, JSON (chunked)
+# ═══════════════════════════════════════════════════════════════
+
+def generate_customers():
+    print("👤 Generating customers...")
+    customers = []
+
+    for cid in range(1, 200_001):
+        first = random.choice(FIRST_NAMES)
+        last = random.choice(LAST_NAMES)
+
+        # 8% messy names (whitespace)
+        name = f"  {first} {last}  " if random.random() < 0.08 else f"{first} {last}"
+
+        # 12% null email
+        email = None if random.random() < 0.12 else f"{first.lower()}.{last.lower()}{cid}@{random.choice(DOMAINS)}"
+
+        # 8% null address
+        if random.random() < 0.08:
+            address = None
+        else:
+            city = random.choice(list(CITIES.keys()))
+            state, pincodes = CITIES[city]
+            address = {"city": city, "state": state, "pincode": random.choice(pincodes)}
+
+        # Phone: array with 1-2 numbers, 5% null, 3% empty array
+        if random.random() < 0.05:
+            phone = None
+        elif random.random() < 0.03:
+            phone = []
+        elif random.random() < 0.3:
+            phone = [random_phone(), random_phone()]
+        else:
+            phone = [random_phone()]
+
+        # 5% null registered_date
+        reg_date = None if random.random() < 0.05 else random_date()
+
+        customers.append({
+            "customer_id": cid,
+            "customer_name": name,
+            "email": email,
+            "phone": phone,
+            "address": address,
+            "registered_date": reg_date
+        })
+
+    # Add 5000 duplicates
+    for _ in range(5000):
+        customers.append(random.choice(customers[:200_000]))
+
+    random.shuffle(customers)
+
+    path = os.path.join(BASE_DIR, "customers")
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "customers.json"), "w") as f:
+        json.dump(customers, f)
+
+    print(f"  ✅ Customers: {len(customers)} rows ({len(customers) - 5000} unique + 5000 dupes)")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ORDERS — 5,000,000 rows, CSV (chunked write)
+# ═══════════════════════════════════════════════════════════════
+
+def generate_orders():
+    print("🛒 Generating orders (5M rows, chunked)...")
+
+    path = os.path.join(BASE_DIR, "orders")
+    os.makedirs(path, exist_ok=True)
+    filepath = os.path.join(path, "orders.csv")
+
+    headers = ["order_id", "customer_id", "product_id", "order_date", "status", "total_amount"]
+    chunk_size = 500_000
+    total_rows = 5_000_000
+    dupe_count = 50_000
+
+    # Pre-generate duplicate order_ids
+    dupe_ids = set(random.sample(range(1, total_rows + 1), dupe_count))
+
+    with open(filepath, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+        oid = 1
+        written = 0
+        chunk_num = 0
+
+        while written < total_rows + dupe_count:
+            chunk = []
+            for _ in range(min(chunk_size, total_rows + dupe_count - written)):
+                customer_id = random.randint(1, 200_000)
+                product_id = random.randint(1, 5000)
+                order_date = messy_date()
+
+                # 15% messy status
+                if random.random() < 0.15:
+                    status = random.choice(MESSY_STATUSES)
+                else:
+                    status = random.choice(STATUSES)
+
+                # 8% bad amount (empty or negative)
+                if random.random() < 0.06:
+                    amount = ""
+                elif random.random() < 0.02:
+                    amount = str(round(-random.uniform(1, 500), 2))
+                else:
+                    amount = str(round(random.uniform(49.99, 49999.99), 2))
+
+                chunk.append([oid, customer_id, product_id, order_date, status, amount])
+
+                # Duplicate: write same order_id again
+                if oid in dupe_ids:
+                    chunk.append([oid, customer_id, product_id, order_date, status, amount])
+
+                oid += 1
+
+            writer.writerows(chunk)
+            written += len(chunk)
+            chunk_num += 1
+            print(f"  📝 Chunk {chunk_num}: {written:,} rows written...")
+
+    file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    print(f"  ✅ Orders: {written:,} rows | {file_size_mb:.1f} MB")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    print("🚀 BenMart Sample Data Generator (1GB)")
+    print("=" * 50)
+
+    os.makedirs(BASE_DIR, exist_ok=True)
+
+    generate_products()
+    generate_customers()
+    generate_orders()
+
+    print("=" * 50)
+    print("🎉 All data generated!")
+    print(f"📁 Location: {os.path.abspath(BASE_DIR)}")

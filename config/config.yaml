@@ -1,60 +1,44 @@
-project:
-  name: benmart-data-platform
-  environment: ${ENV}
-
 s3:
-  raw_bucket: s3://benmart-${ENV}-raw
-  bronze_bucket: s3://benmart-${ENV}-bronze
-  silver_bucket: s3://benmart-${ENV}-silver
-  gold_bucket: s3://benmart-${ENV}-gold
+  raw_bucket: benmart-dev-raw
+  bronze_bucket: benmart-dev-bronze
+  silver_bucket: benmart-dev-silver
+  gold_bucket: benmart-dev-gold
+  manifest_prefix: manifests/
+
+silver:
+  load_mode: incremental
+  output_path: enriched_orders/
 
 gold:
-  silver_input_path: orders
-
-database:
-  rds:
-    host: ${RDS_HOST}
-    port: 3306
-    database: benmart
-    username: ${RDS_USERNAME}
+  load_mode: full
 
 tables:
   orders:
-    source: rds
-    source_format: csv
-    primary_key: order_id
-    partition_column: order_date
-    schema_file: config/schemas/orders.json
     raw_path: orders/
     bronze_path: orders/
-    silver_path: orders/
-    gold_path: orders/
+    load_mode: incremental
+    source: pos_system
+    source_format: csv
+    primary_key: order_id
     read_options:
       header: "true"
       delimiter: ","
       inferSchema: "false"
 
   customers:
+    raw_path: customers/
+    bronze_path: customers/
+    load_mode: incremental
     source: api
     source_format: json
     primary_key: customer_id
-    partition_column: null
-    schema_file: config/schemas/customers.json
-    raw_path: customers/
-    bronze_path: customers/
-    silver_path: customers/
-    gold_path: customers/
     read_options:
       multiLine: "true"
 
   products:
+    raw_path: products/
+    bronze_path: products/
+    load_mode: full
     source: product_team
     source_format: parquet
     primary_key: product_id
-    partition_column: null
-    schema_file: config/schemas/products.json
-    raw_path: products/
-    bronze_path: products/
-    silver_path: products/
-    gold_path: products/
-    broadcast: true
