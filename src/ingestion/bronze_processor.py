@@ -25,7 +25,7 @@ def quarantine(write_path_attr="quarantine_path"):
             if good_count == 0:
                 raise ValueError(f"QUALITY GATE FAILED: {self.table_name} — ALL rows bad!")
 
-            logger.info(f"✅ {good_count} rows passed quality checks")
+            logger.info(f"✅ {good_count} rowss passed quality checks")
             return good_df
 
         return wrapper
