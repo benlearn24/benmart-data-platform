@@ -106,7 +106,7 @@ def get_s3_path(config, layer, table_name):
         logger.error(f"Config key missing for layer='{layer}', table='{table_name}' | Missing key: {str(e)}")
         raise
 
-    full_path = f"{bucket}/{table_path}"
+    full_path = f"s3://{bucket}/{table_path}"
     return full_path
 
 

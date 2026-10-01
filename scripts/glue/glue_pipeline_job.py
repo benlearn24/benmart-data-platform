@@ -1,6 +1,7 @@
 """BenMart Full Pipeline — single Glue job."""
-from src.utils.spark_utils import setup_logging, create_glue_spark
-from src.utils.config_loader import load_config
+
+from utils.spark_utils import setup_logging, create_glue_spark
+from utils.config_loader import load_config
 from src.pipeline_orchestrator import PipelineOrchestrator
 
 setup_logging()

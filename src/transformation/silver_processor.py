@@ -4,7 +4,7 @@ import logging
 from pyspark.sql import functions as F
 from src.utils.base_processor import BaseProcessor
 from src.utils.config_loader import get_s3_path
-from utils.watermark_manager import WatermarkManager
+from src.utils.watermark_manager import WatermarkManager
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class SilverProcessor(BaseProcessor):
 
         silver_config = config.get('silver', {})
         output_path = silver_config.get('output_path', 'enriched_orders')
-        self.silver_path = f"s3://{config['s3']['silver_bucket']}/{output_path}"
+        self.silver_path = f"{config['s3']['silver_bucket']}/{output_path}"
 
         self.load_mode = silver_config.get('load_mode', 'full')
         self.watermark = None

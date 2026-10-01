@@ -1,3 +1,7 @@
+project:
+  name: benmart-data-platform
+  environment: ${ENV}
+
 s3:
   raw_bucket: benmart-dev-raw
   bronze_bucket: benmart-dev-bronze
@@ -11,6 +15,7 @@ silver:
 
 gold:
   load_mode: full
+  silver_input_path: enriched_orders/
 
 tables:
   orders:
@@ -20,6 +25,8 @@ tables:
     source: pos_system
     source_format: csv
     primary_key: order_id
+    partition_column: null
+    schema_file: config/schemas/orders.json
     read_options:
       header: "true"
       delimiter: ","
@@ -32,6 +39,8 @@ tables:
     source: api
     source_format: json
     primary_key: customer_id
+    partition_column: null
+    schema_file: config/schemas/customers.json
     read_options:
       multiLine: "true"
 
@@ -42,3 +51,5 @@ tables:
     source: product_team
     source_format: parquet
     primary_key: product_id
+    partition_column: null
+    schema_file: config/schemas/products.json
