@@ -20,8 +20,8 @@ class SilverProcessor(BaseProcessor):
         self.products_path = get_s3_path(config, 'bronze', 'products')
 
         silver_config = config.get('silver', {})
-        output_path = silver_config.get('output_path', 'enriched_orders')
-        self.silver_path = f"{config['s3']['silver_bucket']}/{output_path}"
+        output_path = silver_config.get('output_path', 'enriched_orders/')
+        self.silver_path = f"s3://{config['s3']['silver_bucket']}/{output_path}"
 
         self.load_mode = silver_config.get('load_mode', 'full')
         self.watermark = None
@@ -49,7 +49,6 @@ class SilverProcessor(BaseProcessor):
             f"customers: {customers.count()}, products: {products.count()}"
         )
 
-        # Incremental: filter orders by watermark timestamp
         if self.load_mode == "incremental" and self.watermark:
             watermark_ts = self.watermark.get_watermark()
             if watermark_ts:
@@ -80,17 +79,14 @@ class SilverProcessor(BaseProcessor):
     def _apply_business_rules(self, df):
         before = df.count()
 
-        # Filter cancelled orders
         df = df.filter(F.col("status") != "cancelled")
 
-        # Filter inactive products
         if "is_active" in df.columns:
             df = df.filter(F.col("is_active") == True)
 
         after = df.count()
         logger.info(f"📏 Business filter: {before} → {after} ({before - after} removed)")
 
-        # GST calculation (18%)
         df = (df
               .withColumn("gst_amount", F.round(F.col("total_amount") * 0.18, 2))
               .withColumn("grand_total", F.round(F.col("total_amount") + F.col("gst_amount"), 2)))
@@ -114,7 +110,6 @@ class SilverProcessor(BaseProcessor):
     def process(self):
         orders, customers, products = self._read_bronze()
 
-        # Capture watermark BEFORE dropping metadata (bronze_loaded_at column)
         new_watermark = None
         if self.load_mode == "incremental" and self.watermark:
             if orders.count() == 0:
@@ -132,7 +127,6 @@ class SilverProcessor(BaseProcessor):
         df = self._add_metadata(df)
         self._write(df)
 
-        # Update watermark after successful write
         if new_watermark:
             self.watermark.update(new_watermark)
 

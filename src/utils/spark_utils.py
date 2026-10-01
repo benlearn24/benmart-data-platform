@@ -1,6 +1,6 @@
-import sys
-import os
 import logging
+import os
+import sys
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
