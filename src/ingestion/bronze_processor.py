@@ -317,4 +317,3 @@ class BronzeProcessor(BaseProcessor):
 def process_bronze(spark, config, table_name, s3_bucket=None):
     processor = BronzeProcessor(spark, config, table_name, s3_bucket)
     return processor.run()
-

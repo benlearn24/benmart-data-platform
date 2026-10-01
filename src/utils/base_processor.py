@@ -22,14 +22,12 @@ class BaseProcessor(ABC):
 
     def run(self):
         logger.info(f"{'='*50}")
-        logger.info(f"{self.processor_name} START")
+        logger.info(f"▶ {self.processor_name} — Starting")
         logger.info(f"{'='*50}")
-
         try:
             result = self.process()
+            logger.info(f"✅ {self.processor_name} — Complete")
+            return result
         except Exception as e:
-            logger.error(f"{self.processor_name} FAILED | {str(e)}")
+            logger.error(f"❌ {self.processor_name} — FAILED: {e}")
             raise
-
-        logger.info(f"{self.processor_name} COMPLETE")
-        return result
