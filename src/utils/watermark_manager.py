@@ -1,5 +1,3 @@
-"""Watermark Manager — tracks last processed timestamp for incremental loads."""
-
 import json
 import boto3
 import logging

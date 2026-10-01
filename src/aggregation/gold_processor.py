@@ -1,5 +1,6 @@
+"""Gold Processor — Star schema and aggregations."""
+
 import logging
-from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from src.utils.base_processor import BaseProcessor
 
@@ -18,8 +19,8 @@ class GoldProcessor(BaseProcessor):
 
         silver_input = config['gold']['silver_input_path']
         if s3_bucket:
-            self.silver_path = f"{config['s3']['silver_bucket']}/{silver_input}"
-            self.gold_path = config['s3']['gold_bucket']
+            self.silver_path = f"s3://{config['s3']['silver_bucket']}/{silver_input}"
+            self.gold_path = f"s3://{config['s3']['gold_bucket']}"
         else:
             self.silver_path = f"data/silver/{silver_input}"
             self.gold_path = "data/gold"
@@ -33,7 +34,7 @@ class GoldProcessor(BaseProcessor):
         try:
             df = self.spark.read.parquet(self.silver_path)
         except Exception as e:
-            logger.error(f"Silver read FAILED: {self.silver_path} | {str(e)}")
+            logger.error(f"Silver read FAILED: {self.silver_path} | {e}")
             raise
         count = df.count()
         if count == 0:
@@ -88,7 +89,7 @@ class GoldProcessor(BaseProcessor):
         agg_df = fact_df.groupBy("order_date").agg(
             F.count("order_id").alias("total_orders"),
             F.sum("total_amount").alias("total_revenue"),
-            F.sum("total_with_gst").alias("total_revenue_with_gst"),
+            F.sum("grand_total").alias("total_revenue_with_gst"),
             F.avg("total_amount").alias("avg_order_value")
         ).orderBy("order_date")
         logger.info(f"agg_daily_revenue: {agg_df.count()} days")
@@ -134,7 +135,7 @@ class GoldProcessor(BaseProcessor):
         try:
             df.write.mode("overwrite").parquet(output_path)
         except Exception as e:
-            logger.error(f"Write FAILED: {table_name} → {output_path} | {str(e)}")
+            logger.error(f"Write FAILED: {table_name} → {output_path} | {e}")
             raise
         logger.info(f"Written: {table_name} ({count} rows)")
 
@@ -164,9 +165,6 @@ class GoldProcessor(BaseProcessor):
             self._write_table(df, table_name)
 
         logger.info(f"Total tables written: {len(gold_tables)}")
-        for name, df in gold_tables.items():
-            logger.info(f"  {name}: {df.count()} rows")
-
         return gold_tables
 
 

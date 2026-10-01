@@ -71,4 +71,3 @@ class ManifestManager:
             ContentType="application/json"
         )
         logger.info(f"📋 Manifest updated: +{len(new_file_paths)} files tracked")
-

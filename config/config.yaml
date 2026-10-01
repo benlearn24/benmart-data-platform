@@ -1,7 +1,3 @@
-project:
-  name: benmart-data-platform
-  environment: ${ENV}
-
 s3:
   raw_bucket: benmart-dev-raw
   bronze_bucket: benmart-dev-bronze
