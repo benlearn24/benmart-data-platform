@@ -5,47 +5,135 @@ s3:
   gold_bucket: benmart-dev-gold
   manifest_prefix: manifests/
 
-silver:
-  load_mode: incremental
-  output_path: enriched_orders/
-
-gold:
-  load_mode: full
-  silver_input_path: enriched_orders/
-
 tables:
+  # ── Manual Sources (existing) ──
   orders:
-    raw_path: orders/
-    bronze_path: orders/
-    load_mode: incremental
-    source: pos_system
+    source: manual_upload
     source_format: csv
-    primary_key: order_id
-    partition_column: null
+    raw_path: orders/
     schema_file: config/schemas/orders.json
+    primary_key: order_id
+    load_mode: incremental
+    partition_column: null
     read_options:
       header: "true"
       delimiter: ","
       inferSchema: "false"
 
   customers:
-    raw_path: customers/
-    bronze_path: customers/
-    load_mode: incremental
     source: api
     source_format: json
-    primary_key: customer_id
-    partition_column: null
+    raw_path: customers/
     schema_file: config/schemas/customers.json
+    primary_key: customer_id
+    load_mode: incremental
+    partition_column: null
     read_options:
       multiLine: "true"
 
   products:
-    raw_path: products/
-    bronze_path: products/
-    load_mode: full
     source: product_team
     source_format: parquet
-    primary_key: product_id
-    partition_column: null
+    raw_path: products/
     schema_file: config/schemas/products.json
+    primary_key: product_id
+    load_mode: full
+    partition_column: null
+    read_options: {}
+
+  # ── DMS Sources (RDS → S3) ──
+  dms_orders:
+    source: dms
+    source_format: csv
+    raw_path: dms-data/benmart/orders/
+    bronze_path: dms_orders/
+    schema_file: config/schemas/orders.json
+    primary_key: order_id
+    load_mode: incremental
+    has_cdc: true
+    partition_column: null
+    dms_columns:
+      - order_id
+      - customer_id
+      - product_id
+      - order_date
+      - total_amount
+      - status
+      - created_at
+      - updated_at
+    read_options:
+      header: "false"
+      inferSchema: "false"
+
+  dms_customers:
+    source: dms
+    source_format: csv
+    raw_path: dms-data/benmart/customers/
+    bronze_path: dms_customers/
+    schema_file: config/schemas/customers.json
+    primary_key: customer_id
+    load_mode: incremental
+    has_cdc: true
+    partition_column: null
+    dms_columns:
+      - customer_id
+      - customer_name
+      - email
+      - phone
+      - city
+      - state
+      - pincode
+      - registered_date
+      - is_active
+      - created_at
+      - updated_at
+    read_options:
+      header: "false"
+      inferSchema: "false"
+
+  dms_products:
+    source: dms
+    source_format: csv
+    raw_path: dms-data/benmart/products/
+    bronze_path: dms_products/
+    schema_file: config/schemas/products.json
+    primary_key: product_id
+    load_mode: full
+    has_cdc: true
+    partition_column: null
+    dms_columns:
+      - product_id
+      - product_name
+      - category
+      - price
+      - is_active
+      - created_at
+      - updated_at
+    read_options:
+      header: "false"
+      inferSchema: "false"
+
+  # ── API Sources (Lambda → S3) ──
+  api_pricing:
+    source: api
+    source_format: json
+    raw_path: api-data/pricing/
+    bronze_path: api_pricing/
+    schema_file: config/schemas/pricing.json
+    primary_key: product_id
+    load_mode: incremental
+    partition_column: null
+    read_options:
+      multiLine: "true"
+
+silver:
+  load_mode: incremental
+  output_path: enriched_orders/
+  source_tables:
+    orders: dms_orders
+    customers: dms_customers
+    products: dms_products
+
+gold:
+  load_mode: full
+  silver_input_path: enriched_orders/

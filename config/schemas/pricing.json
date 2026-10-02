@@ -1,0 +1,13 @@
+{
+  "table_name": "pricing",
+  "columns": [
+    {"name": "product_id", "type": "IntegerType", "nullable": false},
+    {"name": "product_name", "type": "StringType", "nullable": false},
+    {"name": "category", "type": "StringType", "nullable": false},
+    {"name": "base_price", "type": "DecimalType", "nullable": false},
+    {"name": "discount_percentage", "type": "IntegerType", "nullable": true},
+    {"name": "final_price", "type": "DecimalType", "nullable": false},
+    {"name": "currency", "type": "StringType", "nullable": true},
+    {"name": "price_date", "type": "DateType", "nullable": false}
+  ]
+}
