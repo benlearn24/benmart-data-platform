@@ -1,8 +1,9 @@
-"""Bronze Processor — Raw ingestion with multi-format support and incremental loads."""
+"""Bronze Processor — Raw ingestion with multi-format support, incremental loads, and DMS CDC handling."""
 
 import logging
 from functools import wraps
 
+import boto3
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StringType, IntegerType, LongType, DoubleType,
@@ -87,8 +88,11 @@ class BronzeProcessor(BaseProcessor):
             self.quarantine_path = f"data/quarantine/{table_name}"
 
         self.load_mode = self.table_config.get('load_mode', 'full')
-        self.manifest = None
+        self.source_type = self.table_config.get('source', 'manual_upload')
+        self.has_cdc = self.table_config.get('has_cdc', False)
+        self.dms_columns = self.table_config.get('dms_columns', [])
 
+        self.manifest = None
         if self.load_mode == 'incremental' and s3_bucket:
             manifest_prefix = config['s3'].get('manifest_prefix', 'manifests/')
             self.manifest = ManifestManager(
@@ -97,7 +101,7 @@ class BronzeProcessor(BaseProcessor):
 
         logger.info(
             f"🔧 {self.processor_name} initialized | "
-            f"format={self.source_format} | mode={self.load_mode}"
+            f"format={self.source_format} | mode={self.load_mode} | source={self.source_type}"
         )
 
     @property
@@ -143,6 +147,76 @@ class BronzeProcessor(BaseProcessor):
         else:
             logger.info(f"📥 Read {count} rows from {fmt} ({source_label})")
 
+        return df
+
+    def _read_dms_raw(self, file_paths=None):
+        """Reads DMS output — separates LOAD (no op column) and CDC (op column first), renames _cN to actual names."""
+        col_names = self.dms_columns
+
+        # Step 1: Get file list
+        if file_paths:
+            all_files = file_paths
+        else:
+            s3_client = boto3.client('s3')
+            prefix = self.raw_path.replace(f"s3://{self.raw_bucket}/", "")
+            response = s3_client.list_objects_v2(
+                Bucket=self.raw_bucket, Prefix=prefix
+            )
+            all_files = [
+                f"s3://{self.raw_bucket}/{obj['Key']}"
+                for obj in response.get('Contents', [])
+                if obj['Size'] > 0 and not obj['Key'].endswith('/')
+            ]
+
+        if not all_files:
+            logger.warning(f"⚠️ No DMS files found for {self.table_name}")
+            return self.spark.createDataFrame([], StructType([]))
+
+        # Step 2: Separate LOAD and CDC by filename
+        load_files = [f for f in all_files if 'LOAD' in f.split('/')[-1].upper()]
+        cdc_files = [f for f in all_files if 'LOAD' not in f.split('/')[-1].upper()]
+
+        dfs = []
+
+        # Step 3: Read LOAD files — N columns, no operation column
+        if load_files:
+            load_df = (self.spark.read.format("csv")
+                       .option("header", "false")
+                       .option("inferSchema", "false")
+                       .load(load_files))
+
+            for i, name in enumerate(col_names):
+                col_id = f"_c{i}"
+                if col_id in load_df.columns:
+                    load_df = load_df.withColumnRenamed(col_id, name)
+
+            load_df = load_df.withColumn("dms_operation", F.lit("L"))
+            dfs.append(load_df)
+            logger.info(f"📥 DMS LOAD: {load_df.count()} rows from {len(load_files)} files")
+
+        # Step 4: Read CDC files — N+1 columns, first column = operation (I/U/D)
+        if cdc_files:
+            cdc_df = (self.spark.read.format("csv")
+                      .option("header", "false")
+                      .option("inferSchema", "false")
+                      .load(cdc_files))
+
+            cdc_df = cdc_df.withColumnRenamed("_c0", "dms_operation")
+            for i, name in enumerate(col_names):
+                col_id = f"_c{i + 1}"
+                if col_id in cdc_df.columns:
+                    cdc_df = cdc_df.withColumnRenamed(col_id, name)
+
+            dfs.append(cdc_df)
+            logger.info(f"📥 DMS CDC: {cdc_df.count()} rows from {len(cdc_files)} files")
+
+        # Step 5: Union LOAD + CDC
+        if len(dfs) == 1:
+            df = dfs[0]
+        else:
+            df = dfs[0].unionByName(dfs[1], allowMissingColumns=True)
+
+        logger.info(f"📥 DMS Total: {df.count()} rows for {self.table_name}")
         return df
 
     def _clean_data(self, df):
@@ -195,7 +269,13 @@ class BronzeProcessor(BaseProcessor):
                 df = df.withColumn(field.name, F.lit(None).cast(field.dataType))
                 logger.warning(f"  ⚠️ Missing column: {field.name} — added as NULL")
 
-        df = df.select([field.name for field in schema.fields])
+        select_cols = [field.name for field in schema.fields]
+
+        # Preserve dms_operation column for DMS sources
+        if "dms_operation" in df.columns:
+            select_cols.append("dms_operation")
+
+        df = df.select(select_cols)
         logger.info(f"📐 Schema applied: {len(schema.fields)} columns enforced")
         return df
 
@@ -289,7 +369,7 @@ class BronzeProcessor(BaseProcessor):
     def process(self):
         new_files = None
 
-        if self.load_mode == "incremental" and self.manifest:
+        if self.load_mode == 'incremental' and self.manifest:
             raw_prefix = self.raw_path.replace(f"s3://{self.raw_bucket}/", "")
             new_files = self.manifest.get_new_files(raw_prefix)
 
@@ -299,7 +379,12 @@ class BronzeProcessor(BaseProcessor):
 
             logger.info(f"📋 Found {len(new_files)} new files to process")
 
-        df = self._read_raw(file_paths=new_files)
+        # Route to correct read method based on source type
+        if self.source_type == 'dms':
+            df = self._read_dms_raw(file_paths=new_files)
+        else:
+            df = self._read_raw(file_paths=new_files)
+
         df = self._clean_data(df)
         schema = self._build_schema()
         df = self._apply_schema(df, schema)
@@ -308,7 +393,7 @@ class BronzeProcessor(BaseProcessor):
         df = self._validate(df)
         self._write(df)
 
-        if self.load_mode == "incremental" and self.manifest and new_files:
+        if self.load_mode == 'incremental' and self.manifest and new_files:
             self.manifest.update(new_files, df.count())
 
         return df
