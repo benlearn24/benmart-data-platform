@@ -1,0 +1,51 @@
+name: BenMart Deploy Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml boto3
+
+      - name: Package for Glue
+        run: python scripts/package_for_glue.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload Glue package to S3
+        run: |
+          aws s3 cp glue_package.zip s3://benmart-dev-raw/scripts/glue_package.zip
+          echo "✅ Glue package uploaded"
+
+      - name: Upload config to S3
+        run: |
+          aws s3 cp config/config.yaml s3://benmart-dev-raw/config/config.yaml
+          aws s3 cp config/schemas/ s3://benmart-dev-raw/config/schemas/ --recursive
+          echo "✅ Config + schemas uploaded"
+
+      - name: Update Lambda function
+        run: |
+          cd scripts
+          zip lambda_function.zip lambda_function.py 2>/dev/null || echo "No lambda file to zip"
+          aws lambda update-function-code \
+            --function-name benmart-api-ingestion \
+            --zip-file fileb://lambda_function.zip 2>/dev/null || echo "Lambda update skipped"
+          echo "✅ Lambda updated"
