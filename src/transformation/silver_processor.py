@@ -15,11 +15,17 @@ class SilverProcessor(BaseProcessor):
     def __init__(self, spark, config, s3_bucket=None):
         super().__init__(spark, config, s3_bucket)
 
-        self.orders_path = get_s3_path(config, 'bronze', 'orders')
-        self.customers_path = get_s3_path(config, 'bronze', 'customers')
-        self.products_path = get_s3_path(config, 'bronze', 'products')
-
         silver_config = config.get('silver', {})
+        source_tables = silver_config.get('source_tables', {})
+
+        orders_table = source_tables.get('orders', 'orders')
+        customers_table = source_tables.get('customers', 'customers')
+        products_table = source_tables.get('products', 'products')
+
+        self.orders_path = get_s3_path(config, 'bronze', orders_table)
+        self.customers_path = get_s3_path(config, 'bronze', customers_table)
+        self.products_path = get_s3_path(config, 'bronze', products_table)
+
         output_path = silver_config.get('output_path', 'enriched_orders/')
         self.silver_path = f"s3://{config['s3']['silver_bucket']}/{output_path}"
 
@@ -32,7 +38,10 @@ class SilverProcessor(BaseProcessor):
                 config['s3']['raw_bucket'], manifest_prefix, 'silver'
             )
 
-        logger.info(f"🔧 {self.processor_name} initialized | mode={self.load_mode}")
+        logger.info(
+            f"🔧 {self.processor_name} initialized | mode={self.load_mode} | "
+            f"orders={orders_table}, customers={customers_table}, products={products_table}"
+        )
 
     @property
     def processor_name(self):
@@ -64,7 +73,7 @@ class SilverProcessor(BaseProcessor):
         return orders, customers, products
 
     def _drop_metadata(self, df):
-        for col in ["bronze_loaded_at", "bronze_source_file"]:
+        for col in ["bronze_loaded_at", "bronze_source_file", "dms_operation"]:
             if col in df.columns:
                 df = df.drop(col)
         return df

@@ -77,7 +77,7 @@ def get_s3_path(config, layer, table_name):
     try:
         bucket = config['s3'][f'{layer}_bucket']
         table_config = config['tables'][table_name]
-        table_path = table_config[f'{layer}_path']
+        table_path = table_config.get(f'{layer}_path', f'{table_name}/')
     except KeyError as e:
         logger.error(f"Config key missing for layer='{layer}', table='{table_name}' | Missing key: {e}")
         raise
