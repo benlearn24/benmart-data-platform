@@ -5,3 +5,9 @@ data/
 .idea/
 .env
 .glue_package.zip
+terraform.exe
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfvars
+terraform/lambda_*.zip
