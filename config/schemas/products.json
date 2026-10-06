@@ -3,8 +3,17 @@
   "columns": [
     {"name": "product_id", "type": "IntegerType", "nullable": false},
     {"name": "product_name", "type": "StringType", "nullable": false},
+    {"name": "brand", "type": "StringType", "nullable": false},
     {"name": "category", "type": "StringType", "nullable": false},
-    {"name": "price", "type": "DecimalType", "nullable": false},
-    {"name": "is_active", "type": "BooleanType", "nullable": false}
+    {"name": "sub_category", "type": "StringType", "nullable": false},
+    {"name": "mrp", "type": "DecimalType", "nullable": false},
+    {"name": "selling_price", "type": "DecimalType", "nullable": false},
+    {"name": "discount_percentage", "type": "IntegerType", "nullable": true},
+    {"name": "stock_quantity", "type": "IntegerType", "nullable": true},
+    {"name": "weight_kg", "type": "DecimalType", "nullable": true},
+    {"name": "avg_rating", "type": "DecimalType", "nullable": true},
+    {"name": "review_count", "type": "IntegerType", "nullable": true},
+    {"name": "is_active", "type": "BooleanType", "nullable": false},
+    {"name": "launch_date", "type": "DateType", "nullable": true}
   ]
 }

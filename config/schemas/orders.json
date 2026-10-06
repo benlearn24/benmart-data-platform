@@ -5,7 +5,16 @@
     {"name": "customer_id", "type": "IntegerType", "nullable": false},
     {"name": "product_id", "type": "IntegerType", "nullable": false},
     {"name": "order_date", "type": "DateType", "nullable": false},
+    {"name": "quantity", "type": "IntegerType", "nullable": false},
+    {"name": "unit_price", "type": "DecimalType", "nullable": false},
+    {"name": "discount_amount", "type": "DecimalType", "nullable": true},
     {"name": "total_amount", "type": "DecimalType", "nullable": false},
-    {"name": "status", "type": "StringType", "nullable": true}
+    {"name": "status", "type": "StringType", "nullable": true},
+    {"name": "payment_method", "type": "StringType", "nullable": true},
+    {"name": "payment_status", "type": "StringType", "nullable": true},
+    {"name": "shipping_city", "type": "StringType", "nullable": true},
+    {"name": "shipping_state", "type": "StringType", "nullable": true},
+    {"name": "shipping_pincode", "type": "StringType", "nullable": true},
+    {"name": "order_source", "type": "StringType", "nullable": true}
   ]
 }
