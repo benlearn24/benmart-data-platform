@@ -1,13 +1,20 @@
 {
   "table_name": "customers",
   "columns": [
-    {"name": "customer_id",     "type": "IntegerType", "nullable": false},
-    {"name": "customer_name",   "type": "StringType",  "nullable": false},
-    {"name": "email",           "type": "StringType",  "nullable": true},
-    {"name": "phone",           "type": "StringType",  "nullable": true},
-    {"name": "city",            "type": "StringType",  "nullable": true},
-    {"name": "state",           "type": "StringType",  "nullable": true},
-    {"name": "pincode",         "type": "StringType",  "nullable": true},
-    {"name": "registered_date", "type": "DateType",    "nullable": true}
+    {"name": "customer_id", "type": "IntegerType", "nullable": false},
+    {"name": "customer_name", "type": "StringType", "nullable": false},
+    {"name": "email", "type": "StringType", "nullable": true},
+    {"name": "phone", "type": "StringType", "nullable": true},
+    {"name": "gender", "type": "StringType", "nullable": true},
+    {"name": "date_of_birth", "type": "DateType", "nullable": true},
+    {"name": "city", "type": "StringType", "nullable": true},
+    {"name": "state", "type": "StringType", "nullable": true},
+    {"name": "pincode", "type": "StringType", "nullable": true},
+    {"name": "registered_date", "type": "DateType", "nullable": true},
+    {"name": "registration_source", "type": "StringType", "nullable": true},
+    {"name": "preferred_payment", "type": "StringType", "nullable": true},
+    {"name": "is_active", "type": "BooleanType", "nullable": true},
+    {"name": "is_verified", "type": "BooleanType", "nullable": true},
+    {"name": "loyalty_tier", "type": "StringType", "nullable": true}
   ]
 }

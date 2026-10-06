@@ -1,404 +1,355 @@
-"""Bronze Processor — Raw ingestion with multi-format support, incremental loads, and DMS CDC handling."""
+
+"""Bronze processor — reads raw data from any source, cleans, validates, writes to Bronze."""
 
 import logging
-from functools import wraps
+from datetime import datetime
+from pyspark.sql import functions as F, Window, DataFrame
+from pyspark.sql.types import StructType, StructField, StringType
 
-import boto3
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StringType, IntegerType, LongType, DoubleType,
-    DecimalType, DateType, TimestampType, BooleanType,
-    StructType, StructField, ArrayType
+from src.utils.base_processor import BaseProcessor, log_step
+from src.utils.config_loader import (
+    load_schema, get_s3_path, get_write_config, get_quality_thresholds
 )
-
-from src.utils.base_processor import BaseProcessor
-from src.utils.config_loader import get_s3_path, load_table_schema
-from src.utils.manifest_manager import ManifestManager
 
 logger = logging.getLogger(__name__)
 
 
-def quarantine(write_path_attr="quarantine_path"):
-    """Writes bad rows to quarantine, returns only good rows. Raises if ALL rows fail."""
-    def decorator(validate_func):
-        @wraps(validate_func)
-        def wrapper(self, df):
-            good_df, bad_df, report = validate_func(self, df)
-
-            bad_count = bad_df.count()
-            if bad_count > 0:
-                q_path = getattr(self, write_path_attr)
-                bad_df.write.mode("overwrite").format("parquet").save(q_path)
-                logger.warning(f"🔴 Quarantined {bad_count} rows → {q_path}")
-
-            good_count = good_df.count()
-            if good_count == 0:
-                raise ValueError(
-                    f"QUALITY GATE FAILED: {self.table_name} — "
-                    f"ALL {report.get('total', '?')} rows quarantined."
-                )
-
-            logger.info(f"✅ {good_count} rows passed quality checks")
-            return good_df
-
-        return wrapper
-    return decorator
-
-
 class BronzeProcessor(BaseProcessor):
-    """Ingests raw data into Bronze layer with cleaning, schema enforcement, and quality checks."""
+    """Config-driven processor: raw → clean → validated → Bronze layer.
 
-    SUPPORTED_FORMATS = {"csv", "json", "parquet"}
-
-    TYPE_MAP = {
-        "StringType":    StringType(),
-        "IntegerType":   IntegerType(),
-        "LongType":      LongType(),
-        "DoubleType":    DoubleType(),
-        "DecimalType":   DecimalType(10, 2),
-        "DateType":      DateType(),
-        "TimestampType": TimestampType(),
-        "BooleanType":   BooleanType(),
-    }
+    Handles CSV, JSON, Parquet, DMS CDC. Quarantines bad rows,
+    enforces quality gates, deduplicates, writes Delta format.
+    """
 
     def __init__(self, spark, config, table_name, s3_bucket=None):
         super().__init__(spark, config, s3_bucket)
-
         self.table_name = table_name
-        self.table_config = config['tables'][table_name]
 
-        self.source_format = self.table_config.get('source_format', 'csv')
-        self.read_options = self.table_config.get('read_options', {})
-        self.primary_key = self.table_config['primary_key']
-        self.partition_column = self.table_config.get('partition_column', None)
+        # Table-specific config
+        self.table_cfg = config["tables"][table_name]
+        self.source_format = self.table_cfg["source_format"]
+        self.primary_key = self.table_cfg["primary_key"]
+        self.load_mode = self.table_cfg["load_mode"]
+        self.has_cdc = self.table_cfg.get("has_cdc", False)
+        self.read_options = self.table_cfg.get("read_options", {})
 
-        if self.source_format not in self.SUPPORTED_FORMATS:
-            raise ValueError(
-                f"Unsupported format '{self.source_format}' for {table_name}. "
-                f"Supported: {self.SUPPORTED_FORMATS}"
-            )
+        # Paths
+        self.raw_path = get_s3_path(config, "raw", table_name)
+        self.bronze_path = get_s3_path(config, "bronze", table_name)
+        quarantine_prefix = config["validation"]["quarantine_path_prefix"]
+        self.quarantine_path = f"s3://{config['s3']['raw_bucket']}/{quarantine_prefix}/{table_name}/"
 
-        self.raw_bucket = config['s3']['raw_bucket']
-        self.raw_path = get_s3_path(config, 'raw', table_name)
-        self.bronze_path = get_s3_path(config, 'bronze', table_name)
+        # Schema, write config, quality thresholds
+        self.schema = load_schema(self.table_cfg["schema_file"])
+        self.write_cfg = get_write_config(config, table_name)
+        self.thresholds = get_quality_thresholds(config, table_name)
 
-        if s3_bucket:
-            self.quarantine_path = f"s3://{config['s3']['raw_bucket']}/quarantine/{table_name}"
-        else:
-            self.quarantine_path = f"data/quarantine/{table_name}"
+        # Validation settings
+        self.read_mode = config["validation"]["read_mode"]
+        self.corrupt_col = config["validation"]["corrupt_record_column"]
 
-        self.load_mode = self.table_config.get('load_mode', 'full')
-        self.source_type = self.table_config.get('source', 'manual_upload')
-        self.has_cdc = self.table_config.get('has_cdc', False)
-        self.dms_columns = self.table_config.get('dms_columns', [])
-
-        self.manifest = None
-        if self.load_mode == 'incremental' and s3_bucket:
-            manifest_prefix = config['s3'].get('manifest_prefix', 'manifests/')
-            self.manifest = ManifestManager(
-                self.raw_bucket, manifest_prefix, table_name
-            )
+        # Track quarantine count for quality gate
+        self._quarantine_count = 0
 
         logger.info(
-            f"🔧 {self.processor_name} initialized | "
-            f"format={self.source_format} | mode={self.load_mode} | source={self.source_type}"
+            f"Bronze init: {table_name} | format={self.source_format} | "
+            f"mode={self.load_mode} | cdc={self.has_cdc}"
         )
 
     @property
     def processor_name(self):
-        return f"BRONZE: {self.table_name}"
+        """Identifier for logging."""
+        return f"BRONZE:{self.table_name}"
 
-    def _read_raw(self, file_paths=None):
+    # ── READ ────────────────────────────────────────────────────
+
+    @log_step("Read raw data")
+    def _read_raw(self):
+        """Read raw data based on source format (CSV/JSON/Parquet). Config-driven."""
         fmt = self.source_format
-        source = file_paths if file_paths else self.raw_path
-        source_label = f"{len(file_paths)} new files" if file_paths else "full folder"
+        path = self.raw_path
+        reader = self.spark.read
 
-        try:
-            if fmt == "csv":
-                reader = self.spark.read.format("csv")
-                for key, value in self.read_options.items():
-                    reader = reader.option(key, value)
-                df = reader.load(source)
+        # Apply all read options from config
+        for key, value in self.read_options.items():
+            reader = reader.option(key, value)
 
-            elif fmt == "json":
-                reader = self.spark.read.format("json")
-                for key, value in self.read_options.items():
-                    reader = reader.option(key, value)
-                df = reader.load(source)
+        if fmt == "csv":
+            reader = reader.option("mode", self.read_mode)
+            reader = reader.option("columnNameOfCorruptRecord", self.corrupt_col)
+            # Add corrupt record column to schema for PERMISSIVE mode
+            read_schema = self._schema_with_corrupt_col()
+            df = reader.schema(read_schema).csv(path)
 
-            elif fmt == "parquet":
-                if isinstance(source, list):
-                    df = self.spark.read.parquet(*source)
-                else:
-                    df = self.spark.read.parquet(source)
+        elif fmt == "json":
+            df = reader.schema(self.schema).json(path)
 
-            else:
-                raise ValueError(f"Unsupported format: {fmt}")
+        elif fmt == "parquet":
+            df = reader.parquet(path)
 
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.error(f"❌ Read FAILED: {self.raw_path} | {fmt} | {e}")
-            raise RuntimeError(f"Failed to read {fmt} from {self.raw_path}: {e}") from e
-
-        count = df.count()
-        if count == 0:
-            logger.warning(f"⚠️ EMPTY data from {source_label}: {self.raw_path}")
         else:
-            logger.info(f"📥 Read {count} rows from {fmt} ({source_label})")
+            raise ValueError(f"Unsupported format: {fmt}")
+
+        self.safe_count(df, f"raw {self.table_name}")
+        return df
+
+    @log_step("Read DMS CDC data")
+    def _read_dms_raw(self):
+        """Read DMS CDC files — headerless CSV with operation column (I/U/D)."""
+        path = self.raw_path
+        dms_columns = self.table_cfg["dms_columns"]
+
+        # DMS CDC first column = operation (I/U/D), then actual data columns
+        all_columns = ["_dms_operation"] + dms_columns
+
+        # Build schema: all string first (cast later in _apply_schema)
+        dms_schema = StructType([
+            StructField(col, StringType(), True) for col in all_columns
+        ])
+
+        df = (self.spark.read
+              .option("header", "false")
+              .option("inferSchema", "false")
+              .schema(dms_schema)
+              .csv(path))
+
+        total = self.safe_count(df, f"dms raw {self.table_name}")
+
+        # Log CDC operation distribution
+        if total > 0:
+            ops = df.groupBy("_dms_operation").count().collect()
+            op_summary = {row["_dms_operation"]: row["count"] for row in ops}
+            logger.info(f"CDC operations: {op_summary}")
 
         return df
 
-    def _read_dms_raw(self, file_paths=None):
-        """Reads DMS output — separates LOAD (no op column) and CDC (op column first), renames _cN to actual names."""
-        col_names = self.dms_columns
+    @classmethod
+    def _apply_cdc(cls, df):
+        """Apply CDC logic — remove deletes, flag operation for downstream."""
+        before = df.count()
 
-        # Step 1: Get file list
-        if file_paths:
-            all_files = file_paths
-        else:
-            s3_client = boto3.client('s3')
-            prefix = self.raw_path.replace(f"s3://{self.raw_bucket}/", "")
-            response = s3_client.list_objects_v2(
-                Bucket=self.raw_bucket, Prefix=prefix
-            )
-            all_files = [
-                f"s3://{self.raw_bucket}/{obj['Key']}"
-                for obj in response.get('Contents', [])
-                if obj['Size'] > 0 and not obj['Key'].endswith('/')
-            ]
+        # Remove delete operations
+        df = df.filter(F.col("_dms_operation") != "D")
 
-        if not all_files:
-            logger.warning(f"⚠️ No DMS files found for {self.table_name}")
-            return self.spark.createDataFrame([], StructType([]))
+        # Rename internal column to standard name
+        df = df.withColumn("dms_operation",
+                           F.when(F.col("_dms_operation") == "I", "insert")
+                           .when(F.col("_dms_operation") == "U", "update")
+                           .otherwise("unknown"))
+        df = df.drop("_dms_operation")
 
-        # Step 2: Separate LOAD and CDC by filename
-        load_files = [f for f in all_files if 'LOAD' in f.split('/')[-1].upper()]
-        cdc_files = [f for f in all_files if 'LOAD' not in f.split('/')[-1].upper()]
-
-        dfs = []
-
-        # Step 3: Read LOAD files — N columns, no operation column
-        if load_files:
-            load_df = (self.spark.read.format("csv")
-                       .option("header", "false")
-                       .option("inferSchema", "false")
-                       .load(load_files))
-
-            for i, name in enumerate(col_names):
-                col_id = f"_c{i}"
-                if col_id in load_df.columns:
-                    load_df = load_df.withColumnRenamed(col_id, name)
-
-            load_df = load_df.withColumn("dms_operation", F.lit("L"))
-            dfs.append(load_df)
-            logger.info(f"📥 DMS LOAD: {load_df.count()} rows from {len(load_files)} files")
-
-        # Step 4: Read CDC files — N+1 columns, first column = operation (I/U/D)
-        if cdc_files:
-            cdc_df = (self.spark.read.format("csv")
-                      .option("header", "false")
-                      .option("inferSchema", "false")
-                      .load(cdc_files))
-
-            cdc_df = cdc_df.withColumnRenamed("_c0", "dms_operation")
-            for i, name in enumerate(col_names):
-                col_id = f"_c{i + 1}"
-                if col_id in cdc_df.columns:
-                    cdc_df = cdc_df.withColumnRenamed(col_id, name)
-
-            dfs.append(cdc_df)
-            logger.info(f"📥 DMS CDC: {cdc_df.count()} rows from {len(cdc_files)} files")
-
-        # Step 5: Union LOAD + CDC
-        if len(dfs) == 1:
-            df = dfs[0]
-        else:
-            df = dfs[0].unionByName(dfs[1], allowMissingColumns=True)
-
-        logger.info(f"📥 DMS Total: {df.count()} rows for {self.table_name}")
+        after = df.count()
+        logger.info(f"CDC applied: {before} → {after} ({before - after} deletes removed)")
         return df
 
-    def _clean_data(self, df):
-        logger.info(f"🧹 Cleaning: {self.table_name} | format={self.source_format}")
-
-        if "address" in df.columns:
-            df = (df
-                  .withColumn("city", F.col("address.city"))
-                  .withColumn("state", F.col("address.state"))
-                  .withColumn("pincode", F.col("address.pincode"))
-                  .drop("address"))
-            logger.info("  Flattened: address → city, state, pincode")
-
-        if "phone" in df.columns:
-            phone_type = df.schema["phone"].dataType
-            if isinstance(phone_type, ArrayType):
-                df = df.withColumn("phone", F.col("phone").getItem(0))
-                logger.info("  Extracted: phone[0] from array")
-
-        string_cols = [
-            field.name for field in df.schema.fields
-            if isinstance(field.dataType, StringType)
-        ]
-        for col_name in string_cols:
-            df = df.withColumn(col_name, F.trim(F.col(col_name)))
-
-        if string_cols:
-            logger.info(f"  Trimmed whitespace: {len(string_cols)} string columns")
-
-        return df
-
-    def _build_schema(self):
-        schema_json = load_table_schema(
-            self.config, self.table_name, s3_bucket=self.s3_bucket
-        )
-        fields = []
-        for col in schema_json["columns"]:
-            spark_type = self.TYPE_MAP.get(col["type"], StringType())
-            nullable = col.get("nullable", True)
-            fields.append(StructField(col["name"], spark_type, nullable))
-
-        logger.info(f"📐 Schema built: {len(fields)} columns for {self.table_name}")
+    def _schema_with_corrupt_col(self):
+        """Add _corrupt_record column to schema for PERMISSIVE read mode."""
+        fields = list(self.schema.fields)
+        if self.corrupt_col not in [f.name for f in fields]:
+            fields.append(StructField(self.corrupt_col, StringType(), True))
         return StructType(fields)
 
-    def _apply_schema(self, df, schema):
-        for field in schema.fields:
+    # ── SCHEMA ──────────────────────────────────────────────────
+
+    @log_step("Apply schema")
+    def _apply_schema(self, df):
+        """Cast columns to correct types defined in JSON schema."""
+        for field in self.schema.fields:
             if field.name in df.columns:
                 df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
             else:
+                # Column missing in data — add as null with correct type
                 df = df.withColumn(field.name, F.lit(None).cast(field.dataType))
-                logger.warning(f"  ⚠️ Missing column: {field.name} — added as NULL")
-
-        select_cols = [field.name for field in schema.fields]
-
-        # Preserve dms_operation column for DMS sources
-        if "dms_operation" in df.columns:
-            select_cols.append("dms_operation")
-
-        df = df.select(select_cols)
-        logger.info(f"📐 Schema applied: {len(schema.fields)} columns enforced")
+                logger.warning(f"Schema drift: column '{field.name}' missing — added as NULL")
         return df
 
-    @staticmethod
-    def _deduplicate(df, primary_key):
+    @log_step("Detect schema drift")
+    def _detect_schema_drift(self, df):
+        """Log new/missing columns vs expected schema. Alert on unexpected changes."""
+        expected_cols = {f.name for f in self.schema.fields}
+        actual_cols = set(df.columns)
+
+        # New columns in data not in schema
+        new_cols = actual_cols - expected_cols - {self.corrupt_col, "_dms_operation", "dms_operation"}
+        if new_cols:
+            logger.warning(f"Schema drift — NEW columns detected: {new_cols}")
+
+        # Missing columns (already handled in _apply_schema, just log)
+        missing_cols = expected_cols - actual_cols
+        if missing_cols:
+            logger.warning(f"Schema drift — MISSING columns: {missing_cols}")
+
+        return df
+
+    # ── VALIDATE + QUARANTINE ───────────────────────────────────
+
+    @log_step("Validate and quarantine")
+    def _validate_and_quarantine(self, df):
+        """Separate corrupt rows into quarantine. Return clean rows only."""
+        if self.corrupt_col not in df.columns:
+            logger.info("No corrupt record column — skipping quarantine split")
+            return df
+
+        # Split: corrupt vs clean
+        corrupt_df = df.filter(F.col(self.corrupt_col).isNotNull())
+        clean_df = df.filter(F.col(self.corrupt_col).isNull()).drop(self.corrupt_col)
+
+        corrupt_count = corrupt_df.count()
+        self._quarantine_count = corrupt_count
+
+        if corrupt_count > 0:
+            # Write corrupt rows to quarantine path
+            corrupt_df.write.mode("append").json(self.quarantine_path)
+            logger.warning(f"Quarantined {corrupt_count} corrupt rows → {self.quarantine_path}")
+        else:
+            logger.info("No corrupt rows — quarantine empty")
+
+        self.safe_count(clean_df, "clean after quarantine")
+        return clean_df
+
+    # ── QUALITY GATE ────────────────────────────────────────────
+
+    @log_step("Quality gate check")
+    def _quality_gate(self, df):
+        """Enforce quality thresholds from config. Fail pipeline if breached."""
+        total = df.count()
+
+        # Zero rows check
+        if total == 0 and self.config.get("quality", {}).get("fail_on_zero_rows", True):
+            raise ValueError(f"QUALITY GATE FAIL [{self.table_name}]: 0 rows!")
+
+        issues = []
+
+        # Quarantine percentage check
+        max_q_pct = self.config.get("quality", {}).get("max_quarantine_percentage", 20)
+        if self._quarantine_count > 0:
+            q_pct = (self._quarantine_count / (total + self._quarantine_count)) * 100
+            if q_pct > max_q_pct:
+                issues.append(f"quarantine={q_pct:.1f}% > max {max_q_pct}%")
+
+        # Per-column null checks + min row count
+        for key, max_value in self.thresholds.items():
+            if key == "min_row_count":
+                if total < max_value:
+                    issues.append(f"rows={total} < min {max_value}")
+                continue
+
+            if not key.startswith("null_"):
+                continue
+
+            col_name = key.replace("null_", "", 1)
+            if col_name not in df.columns:
+                continue
+
+            null_count, null_pct = self.count_nulls(df, col_name)
+            if null_pct > max_value:
+                issues.append(f"{col_name} null={null_pct}% > max {max_value}%")
+
+        if issues:
+            msg = f"QUALITY GATE FAIL [{self.table_name}]: {'; '.join(issues)}"
+            logger.error(msg)
+            raise ValueError(msg)
+
+        logger.info(f"Quality gate PASS: {total} rows, all checks ok")
+        return df
+
+    # ── DEDUP ───────────────────────────────────────────────────
+
+    @log_step("Deduplicate")
+    def _deduplicate(self, df):
+        """Remove duplicate rows by primary key. Keep latest if timestamps available."""
         before = df.count()
-        df = df.dropDuplicates([primary_key])
+
+        if "updated_at" in df.columns:
+            # Window dedup — keep latest version per primary key
+            w = Window.partitionBy(self.primary_key).orderBy(F.col("updated_at").desc())
+            df = (df.withColumn("_row_num", F.row_number().over(w))
+                  .filter(F.col("_row_num") == 1)
+                  .drop("_row_num"))
+        else:
+            # Simple dedup — just drop exact duplicates
+            df = df.dropDuplicates([self.primary_key])
+
         after = df.count()
         removed = before - after
-
         if removed > 0:
-            logger.info(f"🔁 Dedup: {before} → {after} ({removed} duplicates removed)")
-        else:
-            logger.info(f"🔁 Dedup: {before} rows — no duplicates found")
-
+            logger.info(f"Dedup: {before} → {after} ({removed} duplicates removed)")
         return df
+
+    # ── METADATA ────────────────────────────────────────────────
 
     @staticmethod
     def _add_metadata(df):
+        """Add Bronze-layer tracking columns."""
         return (df
                 .withColumn("bronze_loaded_at", F.current_timestamp())
                 .withColumn("bronze_source_file", F.input_file_name()))
 
-    @quarantine(write_path_attr="quarantine_path")
-    def _validate(self, df):
-        logger.info(f"🔍 Validating: {self.table_name}")
+    # ── WRITE ───────────────────────────────────────────────────
 
-        total_rows = df.count()
-        if total_rows == 0:
-            raise ValueError(f"QUALITY GATE FAILED: {self.table_name} — ZERO rows!")
-
-        schema_json = load_table_schema(
-            self.config, self.table_name, s3_bucket=self.s3_bucket
-        )
-        critical_columns = [
-            col["name"] for col in schema_json["columns"]
-            if not col.get("nullable", True)
-        ]
-
-        bad_condition = None
-        for col_name in critical_columns:
-            if col_name in df.columns:
-                condition = F.col(col_name).isNull()
-                bad_condition = (
-                    condition if bad_condition is None
-                    else (bad_condition | condition)
-                )
-
-        if bad_condition is None:
-            logger.info(f"  No critical columns — all {total_rows} rows pass")
-            return df, self.spark.createDataFrame([], df.schema), {
-                "table": self.table_name, "total": total_rows,
-                "good": total_rows, "bad": 0
-            }
-
-        bad_df = df.filter(bad_condition)
-        good_df = df.filter(~bad_condition)
-
-        bad_count = bad_df.count()
-        good_count = good_df.count()
-
-        logger.info(f"  📊 Quality: Total={total_rows} | Good={good_count} | Bad={bad_count}")
-
-        if bad_count > 0:
-            for col_name in critical_columns:
-                if col_name in df.columns:
-                    null_count = bad_df.filter(F.col(col_name).isNull()).count()
-                    if null_count > 0:
-                        logger.warning(f"     ⚠️ {col_name}: {null_count} nulls")
-
-        return good_df, bad_df, {
-            "table": self.table_name, "total": total_rows,
-            "good": good_count, "bad": bad_count
-        }
-
+    @log_step("Write to Bronze")
     def _write(self, df):
+        """Write clean data to Bronze layer. Delta format, partitioned, config-driven."""
         count = df.count()
         if count == 0:
-            logger.warning(f"⚠️ EMPTY — skipping write to {self.bronze_path}")
+            logger.warning(f"EMPTY — skipping write to {self.bronze_path}")
             return
 
-        write_mode = "append" if self.load_mode == "incremental" else "overwrite"
+        fmt = self.write_cfg["format"]
+        mode = self.write_cfg["mode"]
+        partitions = self.write_cfg["partition_columns"]
+        delta_opts = self.write_cfg["delta_options"]
 
-        writer = df.write.mode(write_mode).format("parquet")
-        if self.partition_column:
-            writer = writer.partitionBy(self.partition_column)
+        writer = df.coalesce(max(1, count // 500000)).write.mode(mode).format(fmt)
+
+        # Delta options
+        if fmt == "delta":
+            for k, v in delta_opts.items():
+                writer = writer.option(k, v)
+
+        # Partition
+        if partitions:
+            writer = writer.partitionBy(*partitions)
+
         writer.save(self.bronze_path)
+        logger.info(f"Written: {count:,} rows → {self.bronze_path} | format={fmt} | mode={mode}")
 
-        logger.info(f"📤 Written {count} rows → {self.bronze_path} | mode={write_mode}")
+    # ── MAIN ORCHESTRATION ──────────────────────────────────────
 
     def process(self):
-        new_files = None
+        """Full Bronze processing flow: read → schema → validate → quality → dedup → write."""
 
-        if self.load_mode == 'incremental' and self.manifest:
-            raw_prefix = self.raw_path.replace(f"s3://{self.raw_bucket}/", "")
-            new_files = self.manifest.get_new_files(raw_prefix)
-
-            if not new_files:
-                logger.info(f"⏭️ No new files for {self.table_name} — skipping")
-                return None
-
-            logger.info(f"📋 Found {len(new_files)} new files to process")
-
-        # Route to correct read method based on source type
-        if self.source_type == 'dms':
-            df = self._read_dms_raw(file_paths=new_files)
+        # Step 1: Read raw data (format-specific)
+        if self.has_cdc:
+            df = self._read_dms_raw()
+            df = self._apply_cdc(df)
         else:
-            df = self._read_raw(file_paths=new_files)
+            df = self._read_raw()
 
-        df = self._clean_data(df)
-        schema = self._build_schema()
-        df = self._apply_schema(df, schema)
-        df = self._deduplicate(df, self.primary_key)
+        # Step 2: Detect schema drift (log warnings)
+        df = self._detect_schema_drift(df)
+
+        # Step 3: Apply schema (cast types)
+        df = self._apply_schema(df)
+
+        # Step 4: Validate + quarantine bad rows
+        df = self._validate_and_quarantine(df)
+
+        # Step 5: Quality gate (fail if thresholds breached)
+        df = self._quality_gate(df)
+
+        # Step 6: Dedup
+        df = self._deduplicate(df)
+
+        # Step 7: Add metadata
         df = self._add_metadata(df)
-        df = self._validate(df)
-        self._write(df)
 
-        if self.load_mode == 'incremental' and self.manifest and new_files:
-            self.manifest.update(new_files, df.count())
+        # Step 8: Write
+        self._write(df)
 
         return df
 
 
 def process_bronze(spark, config, table_name, s3_bucket=None):
-    processor = BronzeProcessor(spark, config, table_name, s3_bucket)
-    return processor.run()
+    """Convenience function — create processor and run."""
+    return BronzeProcessor(spark, config, table_name, s3_bucket).run()

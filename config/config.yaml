@@ -1,20 +1,118 @@
+
+# BenMart Data Platform — Pipeline Configuration
+
 s3:
   raw_bucket: benmart-dev-raw
   bronze_bucket: benmart-dev-bronze
   silver_bucket: benmart-dev-silver
   gold_bucket: benmart-dev-gold
-  manifest_prefix: manifests/
 
+# Pipeline state management (DynamoDB)
+dynamodb:
+  metadata_table: benmart-pipeline-metadata       # processed file tracking
+  watermark_table: benmart-pipeline-watermarks     # incremental load timestamps
+  lock_table: benmart-pipeline-locks               # concurrent run prevention
+  quality_table: benmart-pipeline-quality           # per-run quality scores
+  region: ap-south-1
+
+# Runtime behavior
+pipeline:
+  retry:
+    max_attempts: 3
+    backoff_seconds: 60
+  timeout:
+    bronze_job_minutes: 30
+    silver_job_minutes: 20
+    gold_job_minutes: 15
+  concurrency:
+    max_parallel_bronze: 3
+  alerts:
+    sns_topic_arn: "arn:aws:sns:ap-south-1:ACCOUNT_ID:benmart-pipeline-alerts"
+    alert_on:
+      - job_failure
+      - quality_gate_breach
+      - zero_rows_detected
+      - quarantine_threshold_exceeded
+
+# Output format and write behavior
+write:
+  format: delta
+  mode:
+    incremental: append
+    full: overwrite
+  delta_options:
+    mergeSchema: "true"
+    overwriteSchema: "false"
+  partition_columns:
+    orders: ["order_date"]
+    customers: null
+    products: null
+    dms_orders: ["order_date"]
+    dms_customers: null
+    dms_products: null
+    api_pricing: ["price_date"]
+
+# Bad row handling
+validation:
+  quarantine_path_prefix: quarantine
+  corrupt_record_column: _corrupt_record
+  read_mode: PERMISSIVE
+
+# Quality gates — null% limits and minimum row counts per table
+quality:
+  fail_on_zero_rows: true
+  max_quarantine_percentage: 20
+  thresholds:
+    orders:
+      null_order_id: 0
+      null_customer_id: 0
+      null_total_amount: 5
+      null_status: 10
+      min_row_count: 1000
+    customers:
+      null_customer_id: 0
+      null_customer_name: 0
+      null_email: 15
+      null_city: 10
+      min_row_count: 100
+    products:
+      null_product_id: 0
+      null_product_name: 0
+      null_category: 0
+      min_row_count: 50
+    dms_orders:
+      null_order_id: 0
+      null_customer_id: 0
+      null_total_amount: 5
+      null_status: 10
+      min_row_count: 100
+    dms_customers:
+      null_customer_id: 0
+      null_customer_name: 0
+      null_email: 15
+      null_city: 10
+      min_row_count: 50
+    dms_products:
+      null_product_id: 0
+      null_product_name: 0
+      null_category: 0
+      min_row_count: 20
+    api_pricing:
+      null_product_id: 0
+      null_price: 0
+      min_row_count: 10
+
+# ── Bronze table definitions ──────────────────────────────────
 tables:
-  # ── Manual Sources (existing) ──
+
   orders:
     source: manual_upload
     source_format: csv
     raw_path: orders/
+    bronze_path: orders/
     schema_file: config/schemas/orders.json
     primary_key: order_id
     load_mode: incremental
-    partition_column: null
     read_options:
       header: "true"
       delimiter: ","
@@ -24,10 +122,10 @@ tables:
     source: api
     source_format: json
     raw_path: customers/
+    bronze_path: customers/
     schema_file: config/schemas/customers.json
     primary_key: customer_id
     load_mode: incremental
-    partition_column: null
     read_options:
       multiLine: "true"
 
@@ -35,13 +133,13 @@ tables:
     source: product_team
     source_format: parquet
     raw_path: products/
+    bronze_path: products/
     schema_file: config/schemas/products.json
     primary_key: product_id
     load_mode: full
-    partition_column: null
     read_options: {}
 
-  # ── DMS Sources (RDS → S3) ──
+  # DMS CDC sources — headerless CSV, first column = operation (I/U/D)
   dms_orders:
     source: dms
     source_format: csv
@@ -51,14 +149,22 @@ tables:
     primary_key: order_id
     load_mode: incremental
     has_cdc: true
-    partition_column: null
     dms_columns:
       - order_id
       - customer_id
       - product_id
       - order_date
+      - quantity
+      - unit_price
+      - discount_amount
       - total_amount
       - status
+      - payment_method
+      - payment_status
+      - shipping_city
+      - shipping_state
+      - shipping_pincode
+      - order_source
       - created_at
       - updated_at
     read_options:
@@ -74,17 +180,22 @@ tables:
     primary_key: customer_id
     load_mode: incremental
     has_cdc: true
-    partition_column: null
     dms_columns:
       - customer_id
       - customer_name
       - email
       - phone
+      - gender
+      - date_of_birth
       - city
       - state
       - pincode
       - registered_date
+      - registration_source
+      - preferred_payment
       - is_active
+      - is_verified
+      - loyalty_tier
       - created_at
       - updated_at
     read_options:
@@ -100,20 +211,27 @@ tables:
     primary_key: product_id
     load_mode: full
     has_cdc: true
-    partition_column: null
     dms_columns:
       - product_id
       - product_name
+      - brand
       - category
-      - price
+      - sub_category
+      - mrp
+      - selling_price
+      - discount_percentage
+      - stock_quantity
+      - weight_kg
+      - avg_rating
+      - review_count
       - is_active
+      - launch_date
       - created_at
       - updated_at
     read_options:
       header: "false"
       inferSchema: "false"
 
-  # ── API Sources (Lambda → S3) ──
   api_pricing:
     source: api
     source_format: json
@@ -122,18 +240,206 @@ tables:
     schema_file: config/schemas/pricing.json
     primary_key: product_id
     load_mode: incremental
-    partition_column: null
     read_options:
       multiLine: "true"
 
+# ── Silver layer — merge all sources + join + enrich ──────────
 silver:
-  load_mode: incremental
-  output_path: enriched_orders/
-  source_tables:
-    orders: dms_orders
-    customers: dms_customers
-    products: dms_products
+  enriched_orders:
+    load_mode: incremental
+    output_path: enriched_orders/
 
+    # Step 1: UNION same-entity tables from different sources
+    # Same entity arriving from CSV, DMS, API — merge into one
+    unions:
+      all_orders:
+        tables: [orders, dms_orders]
+        dedup_key: order_id
+        dedup_order_by: updated_at
+        keep: latest
+      all_customers:
+        tables: [customers, dms_customers]
+        dedup_key: customer_id
+        dedup_order_by: updated_at
+        keep: latest
+      all_products:
+        tables: [products, dms_products]
+        dedup_key: product_id
+        dedup_order_by: updated_at
+        keep: latest
+
+    # Step 2: JOIN merged tables + pricing
+    joins:
+      - left: all_orders
+        right: all_customers
+        left_key: customer_id
+        right_key: customer_id
+        how: left
+      - left: _result
+        right: all_products
+        left_key: product_id
+        right_key: product_id
+        how: left
+      - left: _result
+        right: api_pricing
+        left_key: product_id
+        right_key: product_id
+        how: left
+
+    # Step 3: Derived business columns
+    derived_columns:
+      net_amount: "total_amount - discount_amount"
+      order_year: "year(order_date)"
+      order_month: "month(order_date)"
+      order_day_of_week: "dayofweek(order_date)"
+      customer_age: "floor(datediff(current_date(), date_of_birth) / 365)"
+      is_high_value: "CASE WHEN total_amount >= 5000 THEN true ELSE false END"
+
+    drop_columns:
+      - created_at
+      - updated_at
+
+    dedup:
+      key: order_id
+      order_by: updated_at
+      keep: latest
+
+    partition_columns: ["order_date"]
+
+# ── Gold layer — star schema + marts ──────────────────────────
 gold:
-  load_mode: full
   silver_input_path: enriched_orders/
+
+  fact_tables:
+    fact_orders:
+      load_mode: full
+      output_path: fact_orders/
+      select_columns:
+        - order_id
+        - customer_id
+        - product_id
+        - order_date
+        - order_year
+        - order_month
+        - quantity
+        - unit_price
+        - discount_amount
+        - total_amount
+        - net_amount
+        - status
+        - payment_method
+        - payment_status
+        - shipping_city
+        - shipping_state
+        - order_source
+        - is_high_value
+      partition_columns: ["order_year", "order_month"]
+
+  dimension_tables:
+    dim_customers:
+      load_mode: full
+      output_path: dim_customers/
+      attributes:
+        - customer_id
+        - customer_name
+        - email
+        - phone
+        - gender
+        - city
+        - state
+        - pincode
+        - loyalty_tier
+        - is_active
+        - is_verified
+        - registered_date
+        - preferred_payment
+        - customer_age
+      dedup_key: customer_id
+      dedup_order_by: registered_date
+      partition_columns: null
+
+    dim_products:
+      load_mode: full
+      output_path: dim_products/
+      attributes:
+        - product_id
+        - product_name
+        - brand
+        - category
+        - sub_category
+        - mrp
+        - selling_price
+        - discount_percentage
+        - avg_rating
+        - review_count
+        - is_active
+        - launch_date
+      dedup_key: product_id
+      dedup_order_by: launch_date
+      partition_columns: null
+
+    dim_date:
+      load_mode: full
+      output_path: dim_date/
+      generate: true
+      date_range:
+        start: "2023-01-01"
+        end: "2027-12-31"
+
+  marts:
+    daily_revenue:
+      load_mode: full
+      output_path: mart_daily_revenue/
+      grain: ["order_date", "category"]
+      metrics:
+        total_revenue: "sum(net_amount)"
+        order_count: "count(distinct order_id)"
+        avg_order_value: "avg(net_amount)"
+        total_quantity: "sum(quantity)"
+        total_discount: "sum(discount_amount)"
+      partition_columns: ["order_date"]
+
+    customer_lifetime:
+      load_mode: full
+      output_path: mart_customer_lifetime/
+      grain: ["customer_id"]
+      metrics:
+        lifetime_value: "sum(net_amount)"
+        order_count: "count(distinct order_id)"
+        first_order: "min(order_date)"
+        last_order: "max(order_date)"
+        avg_order_value: "avg(net_amount)"
+        distinct_products: "count(distinct product_id)"
+      partition_columns: null
+
+    category_performance:
+      load_mode: full
+      output_path: mart_category_performance/
+      grain: ["category", "order_month", "order_year"]
+      metrics:
+        revenue: "sum(net_amount)"
+        units_sold: "sum(quantity)"
+        order_count: "count(distinct order_id)"
+        unique_customers: "count(distinct customer_id)"
+        avg_selling_price: "avg(unit_price)"
+      partition_columns: null
+
+    city_trends:
+      load_mode: full
+      output_path: mart_city_trends/
+      grain: ["shipping_city", "shipping_state", "order_month", "order_year"]
+      metrics:
+        revenue: "sum(net_amount)"
+        order_count: "count(distinct order_id)"
+        unique_customers: "count(distinct customer_id)"
+      partition_columns: null
+
+    payment_analysis:
+      load_mode: full
+      output_path: mart_payment_analysis/
+      grain: ["payment_method", "order_month", "order_year"]
+      metrics:
+        revenue: "sum(net_amount)"
+        order_count: "count(distinct order_id)"
+        avg_order_value: "avg(net_amount)"
+      partition_columns: null
